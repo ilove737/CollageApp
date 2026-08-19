@@ -1,0 +1,12 @@
+<resources>
+    <string-array name="mode_names">
+        <item>横向</item>
+        <item>纵向</item>
+        <item>网格</item>
+        <item>智能长图</item>
+    </string-array>
+    <string-array name="grid_cols">
+        <item>2</item>
+        <item>3</item>
+    </string-array>
+</resources>

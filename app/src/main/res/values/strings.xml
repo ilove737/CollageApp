@@ -1,0 +1,30 @@
+<resources>
+    <string name="app_name">图片拼接</string>
+    <string name="pick_images">选择图片</string>
+    <string name="count_hint">已选择 %1$d 张图片</string>
+    <string name="mode_hint">拼接模式</string>
+    <string name="grid_cols_hint">每行列数</string>
+    <string name="color_hint">边框/背景色</string>
+    <string name="gap_hint">间距</string>
+    <string name="radius_hint">圆角</string>
+    <string name="thumb_hint">图片列表：点图片调整顺序/删除</string>
+    <string name="merge_save">合成并保存</string>
+    <string name="merging">合成中…</string>
+    <string name="err_no_images">请先选择图片</string>
+    <string name="merge_fail">合成失败</string>
+    <string name="preview_title">拼接完成</string>
+    <string name="save_to_gallery">保存到相册</string>
+    <string name="share">分享</string>
+    <string name="cancel">取消</string>
+    <string name="saved_ok">已保存到相册（Pictures/Collage）</string>
+    <string name="saved_fail">保存失败</string>
+    <string name="move_prev">前移</string>
+    <string name="move_next">后移</string>
+    <string name="segment_person">抠人像</string>
+    <string name="segmenting">抠图中…</string>
+    <string name="segment_ok">已抠出人像（透明背景）</string>
+    <string name="segment_fail">抠图失败</string>
+    <string name="del">删除</string>
+    <string name="already_first">已经是第一张</string>
+    <string name="already_last">已经是最后一张</string>
+</resources>
