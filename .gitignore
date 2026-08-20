@@ -8,9 +8,6 @@ build/
 .kotlin/
 gradle/wrapper/gradle-wrapper.jar
 
-# 大型模型文件（176MB tflite，建议用 LFS 或外部托管）
-app/src/main/assets/*.tflite
-
 # IDE
 .idea/
 *.iml
