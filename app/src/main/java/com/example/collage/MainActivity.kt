@@ -63,6 +63,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "CollageApp"
+        private const val MAX_IMAGES = 9   // 单次/累计可选图片上限
         private const val MAX_SIDE = 1600  // 单图解码最大边长（防 OOM）
         private const val MAX_DIM = 4096   // 横/纵/网格结果最大边长
         private const val MAX_LONG = 8192  // 智能长图最大总高度
@@ -80,6 +81,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val images = mutableListOf<Uri>()
+    // 记录已抠图图片的位置（用于缩略图角标）
+    private val segmentedSet = mutableSetOf<Int>()
     private var selectedColor = 0
     private val colors = intArrayOf(
         Color.WHITE,
@@ -100,18 +103,25 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvGap: TextView
     private lateinit var tvRadius: TextView
     private lateinit var colorRow: LinearLayout
+    private lateinit var styleGroup: LinearLayout
+    private lateinit var smartHint: TextView
     private lateinit var btnMerge: Button
 
     // 系统相册选择器：Android 13+ 走 Photo Picker（免权限），旧系统自动回退
-    // 追加模式：多次选择会累计图片（去重，上限 9 张）
+    // 追加模式：多次选择会累计图片（去重，上限 MAX_IMAGES 张）
     private val pickImages = registerForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia(9)
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_IMAGES)
     ) { uris ->
         if (uris.isNotEmpty()) {
+            var added = 0
             for (u in uris) {
-                if (!images.contains(u) && images.size < 9) {
+                if (!images.contains(u) && images.size < MAX_IMAGES) {
                     images.add(u)
+                    added++
                 }
+            }
+            if (added == 0 && images.size >= MAX_IMAGES) {
+                toast(getString(R.string.max_images))
             }
             refresh()
         }
@@ -131,6 +141,8 @@ class MainActivity : AppCompatActivity() {
         tvGap = findViewById(R.id.tvGap)
         tvRadius = findViewById(R.id.tvRadius)
         colorRow = findViewById(R.id.colorRow)
+        styleGroup = findViewById(R.id.styleGroup)
+        smartHint = findViewById(R.id.smartHint)
         btnMerge = findViewById(R.id.btnMerge)
 
         findViewById<Button>(R.id.btnPick).setOnClickListener {
@@ -143,6 +155,13 @@ class MainActivity : AppCompatActivity() {
         modeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, position: Int, id: Long) {
                 gridOption.visibility = if (position == MODE_GRID) View.VISIBLE else View.GONE
+                // 智能长图忽略间距/圆角：禁用以消除困惑并给出说明
+                val isSmart = position == MODE_SMART
+                styleGroup.isEnabled = !isSmart
+                for (i in 0 until styleGroup.childCount) {
+                    setChildrenEnabled(styleGroup.getChildAt(i), !isSmart)
+                }
+                smartHint.visibility = if (isSmart) View.VISIBLE else View.GONE
             }
 
             override fun onNothingSelected(p: AdapterView<*>?) {}
@@ -151,6 +170,8 @@ class MainActivity : AppCompatActivity() {
         seekGap.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
                 tvGap.text = "${progress}px"
+                // 拖动时即时刷新缩略图，所见即所得
+                if (fromUser) gridPreview.invalidateViews()
             }
 
             override fun onStartTrackingTouch(sb: SeekBar?) {}
@@ -160,6 +181,7 @@ class MainActivity : AppCompatActivity() {
         seekRadius.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
                 tvRadius.text = "${progress}px"
+                if (fromUser) gridPreview.invalidateViews()
             }
 
             override fun onStartTrackingTouch(sb: SeekBar?) {}
@@ -174,28 +196,57 @@ class MainActivity : AppCompatActivity() {
     // ---------- 边框/背景色色块 ----------
     private fun buildColorRow() {
         colorRow.removeAllViews()
+        val accent = 0xFF2196F3.toInt()
         colors.forEachIndexed { i, c ->
-            val v = View(this)
-            val size = dp(30)
-            v.layoutParams = LinearLayout.LayoutParams(size, size).apply {
+            // 用 FrameLayout 包裹，选中时叠加对勾，便于在白块上也清晰可见
+            val frame = FrameLayout(this)
+            frame.layoutParams = LinearLayout.LayoutParams(dp(30), dp(30)).apply {
                 marginEnd = dp(8)
             }
+            val v = View(this)
+            v.layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
             val bg = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(c)
                 if (i == selectedColor) {
-                    setStroke(dp(3), 0xFF37474F.toInt())
+                    setStroke(dp(4), accent)
                 } else {
                     setStroke(dp(1), 0x66000000)
                 }
             }
             v.background = bg
-            v.setOnClickListener {
+            frame.addView(v)
+            if (i == selectedColor) {
+                val check = TextView(this).apply {
+                    text = "✓"
+                    setTextColor(if (isLightColor(c)) accent else Color.WHITE)
+                    textSize = 16f
+                    gravity = android.view.Gravity.CENTER
+                    layoutParams = FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                }
+                frame.addView(check)
+            }
+            frame.setOnClickListener {
                 selectedColor = i
                 buildColorRow()
             }
-            colorRow.addView(v)
+            colorRow.addView(frame)
         }
+    }
+
+    /** 判断颜色是否为浅色（用于决定对勾颜色，避免白底白字看不清） */
+    private fun isLightColor(c: Int): Boolean {
+        val r = (c shr 16) and 0xFF
+        val g = (c shr 8) and 0xFF
+        val b = c and 0xFF
+        // 感知亮度（ITU-R BT.601）
+        return (0.299 * r + 0.587 * g + 0.114 * b) > 150
     }
 
     private fun refresh() {
@@ -204,6 +255,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** 递归启停 ViewGroup 内所有子控件（用于智能长图禁用间距/圆角） */
+    private fun setChildrenEnabled(view: View, enabled: Boolean) {
+        view.isEnabled = enabled
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                setChildrenEnabled(view.getChildAt(i), enabled)
+            }
+        }
+    }
 
     // ---------- 缩略图适配器（末尾固定一个「+」添加格；点图弹菜单：前移/后移/删除） ----------
     private inner class ThumbAdapter : BaseAdapter() {
@@ -233,8 +294,12 @@ class MainActivity : AppCompatActivity() {
             val root = convertView ?: layoutInflater.inflate(R.layout.item_thumb, parent, false)
             root.findViewById<ImageView>(R.id.thumb)
                 .setImageBitmap(decode(images[position], dp(150)))
+            // 已抠图角标
+            root.findViewById<TextView>(R.id.badgeSeg).visibility =
+                if (segmentedSet.contains(position)) View.VISIBLE else View.GONE
             root.findViewById<View>(R.id.btnRemove).setOnClickListener {
                 images.removeAt(position)
+                syncSegmentedSetOnRemove(position)
                 refresh()
             }
             root.setOnClickListener { showImageMenu(position) }
@@ -253,18 +318,34 @@ class MainActivity : AppCompatActivity() {
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> if (p > 0) {
-                        val t = images[p]; images[p] = images[p - 1]; images[p - 1] = t; refresh()
+                        val t = images[p]; images[p] = images[p - 1]; images[p - 1] = t
+                        // 同步已抠图角标：交换两处标记
+                        val a = segmentedSet.contains(p)
+                        val b = segmentedSet.contains(p - 1)
+                        segmentedSet.apply {
+                            if (a) add(p - 1) else remove(p - 1)
+                            if (b) add(p) else remove(p)
+                        }
+                        refresh()
                     } else {
                         toast(getString(R.string.already_first))
                     }
                     1 -> if (p < images.size - 1) {
-                        val t = images[p]; images[p] = images[p + 1]; images[p + 1] = t; refresh()
+                        val t = images[p]; images[p] = images[p + 1]; images[p + 1] = t
+                        val a = segmentedSet.contains(p)
+                        val b = segmentedSet.contains(p + 1)
+                        segmentedSet.apply {
+                            if (a) add(p + 1) else remove(p + 1)
+                            if (b) add(p) else remove(p)
+                        }
+                        refresh()
                     } else {
                         toast(getString(R.string.already_last))
                     }
                     2 -> segmentImage(p)
                     3 -> {
                         images.removeAt(p)
+                        syncSegmentedSetOnRemove(p)
                         refresh()
                     }
                 }
@@ -272,14 +353,12 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // ---------- 人像抠图（MediaPipe Selfie Segmenter，本地推理） ----------
+    // ---------- 人像抠图（本地推理） ----------
     // 抠图结果保存为透明 PNG（app 私有目录），替换原图参与拼接。
+    // 进度反馈用独立 Toast，不占用「合成并保存」按钮，避免用户误以为 App 卡死。
     private fun segmentImage(p: Int) {
         val uri = images[p]
-        val btn = btnMerge
-        btn.isEnabled = false
-        val originText = btn.text
-        btn.text = getString(R.string.segmenting)
+        toast(getString(R.string.segmenting))
         Thread {
             val result = try {
                 val bmp = decode(uri, 1024) ?: throw IllegalStateException("图片解码失败")
@@ -289,8 +368,6 @@ class MainActivity : AppCompatActivity() {
                 null
             }
             runOnUiThread {
-                btn.isEnabled = true
-                btn.text = originText
                 if (result != null) {
                     try {
                         val dir = File(filesDir, "segment").apply { mkdirs() }
@@ -299,6 +376,8 @@ class MainActivity : AppCompatActivity() {
                         result.recycle()
                         // 换成 FileProvider uri，后续 decode/合成照常工作
                         images[p] = FileProvider.getUriForFile(this, "$packageName.fileprovider", png)
+                        // 记录已抠图位置，供缩略图显示角标
+                        segmentedSet.add(p)
                         refresh()
                         toast(getString(R.string.segment_ok))
                     } catch (e: Exception) {
@@ -974,5 +1053,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun toast(msg: String) {
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    /** 删除第 index 张后，修正已抠图角标集合中的位置索引 */
+    private fun syncSegmentedSetOnRemove(index: Int) {
+        val it = segmentedSet.iterator()
+        val next = mutableSetOf<Int>()
+        while (it.hasNext()) {
+            val pos = it.next()
+            if (pos < index) next.add(pos)
+            else if (pos > index) next.add(pos - 1)
+        }
+        segmentedSet.clear()
+        segmentedSet.addAll(next)
     }
 }

@@ -10,15 +10,31 @@
         android:layout_height="match_parent"
         android:scaleType="centerCrop" />
 
+    <!-- 已抠图角标（默认隐藏，抠图后出现） -->
+    <TextView
+        android:id="@+id/badgeSeg"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="2dp"
+        android:background="#CC000000"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
+        android:text="@string/seg_badge"
+        android:textColor="#FFFFFF"
+        android:textSize="10sp"
+        android:visibility="gone" />
+
+    <!-- 删除按钮：热区放大到 28dp，加白色描边保证在亮图上可见 -->
     <TextView
         android:id="@+id/btnRemove"
-        android:layout_width="20dp"
-        android:layout_height="20dp"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
         android:layout_gravity="top|end"
         android:layout_margin="2dp"
         android:background="@drawable/ic_remove_bg"
         android:gravity="center"
         android:text="✕"
         android:textColor="#FFFFFF"
-        android:textSize="11sp" />
+        android:textSize="13sp" />
 </FrameLayout>
