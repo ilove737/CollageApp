@@ -1,1070 +1,774 @@
 package com.example.collage
 
-import android.content.ContentValues
+import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Matrix
-import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import android.util.TypedValue
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.AbsListView
-import android.widget.AdapterView
-import android.widget.BaseAdapter
-import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.GridView
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.SeekBar
-import android.widget.Spinner
-import android.widget.TextView
-import android.widget.Toast
+import android.widget.*
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.FileProvider
-import androidx.exifinterface.media.ExifInterface
-import com.google.mediapipe.framework.image.BitmapImageBuilder
-import com.google.mediapipe.framework.image.ByteBufferExtractor
-import com.google.mediapipe.framework.image.MPImage
-import com.google.mediapipe.tasks.core.BaseOptions
-import com.google.mediapipe.tasks.core.Delegate
-import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
-import org.tensorflow.lite.Interpreter
-import java.io.File
-import java.io.FileInputStream
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import kotlin.math.abs
+import com.example.collage.CanvasElement.ImageElement
 import kotlin.math.ceil
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.pow
+import kotlin.math.sqrt
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.*
 
 class MainActivity : AppCompatActivity() {
 
-    companion object {
-        private const val TAG = "CollageApp"
-        private const val MAX_IMAGES = 9   // 单次/累计可选图片上限
-        private const val MAX_SIDE = 1600  // 单图解码最大边长（防 OOM）
-        private const val MAX_DIM = 4096   // 横/纵/网格结果最大边长
-        private const val MAX_LONG = 8192  // 智能长图最大总高度
-        private const val CELL = 600       // 网格模式格子边长
-        private const val MODE_HOR = 0
-        private const val MODE_VER = 1
-        private const val MODE_GRID = 2
-        private const val MODE_SMART = 3
-        // TFLite 人像抠图（u2net_human_seg，轻量人像分割，优于 selfie_segmenter）
-        private const val MODEL_TFLITE = "u2net_human_seg.tflite"
-        private const val U2NET_INPUT_SIZE = 320  // u2net_human_seg 标准输入边长
-        // 抠图后处理阈值（置信度连续值直接当 alpha 会发灰/有残影，故加硬切+羽化）
-        private const val MASK_THRESHOLD = 0.5f  // 低于此值视为背景（全透明）
-        private const val MASK_FEATHER = 0.18f   // 阈值附近羽化半宽，越大边缘越柔、越小越锐利
-    }
+    private lateinit var canvas: FreeCanvasView
+    private lateinit var gridView: GridView
+    private lateinit var modeList: LinearLayout
+    private lateinit var leftListContainer: LinearLayout
+    private lateinit var rightPanel: LinearLayout
+    private lateinit var propContainer: LinearLayout
+    private lateinit var tvNoSelection: TextView
+    private lateinit var tvPanelTitle: TextView
+    private lateinit var tvTitle: TextView
 
-    private val images = mutableListOf<Uri>()
-    // 记录已抠图图片的位置（用于缩略图角标）
-    private val segmentedSet = mutableSetOf<Int>()
-    private var selectedColor = 0
-    private val colors = intArrayOf(
-        Color.WHITE,
-        Color.BLACK,
-        0xFF607D8B.toInt(),  // 蓝灰
-        0xFFF44336.toInt(),  // 红
-        0xFF2196F3.toInt(),  // 蓝
-        0xFFFF9800.toInt()   // 橙
+    private var mode = "free"   // grid | free | poster | puzzle
+
+    private val modes = listOf(
+        ModeItem("grid", R.drawable.ic_grid, R.string.mode_grid),
+        ModeItem("free", R.drawable.ic_free, R.string.mode_free),
+        ModeItem("poster", R.drawable.ic_poster, R.string.mode_poster),
+        ModeItem("puzzle", R.drawable.ic_puzzle, R.string.mode_puzzle)
     )
 
-    private lateinit var gridPreview: GridView
-    private lateinit var tvCount: TextView
-    private lateinit var modeSpinner: Spinner
-    private lateinit var gridOption: LinearLayout
-    private lateinit var spCols: Spinner
-    private lateinit var seekGap: SeekBar
-    private lateinit var seekRadius: SeekBar
-    private lateinit var tvGap: TextView
-    private lateinit var tvRadius: TextView
-    private lateinit var colorRow: LinearLayout
-    private lateinit var styleGroup: LinearLayout
-    private lateinit var smartHint: TextView
-    private lateinit var btnMerge: Button
+    data class ModeItem(val id: String, val icon: Int, val label: Int)
 
-    // 系统相册选择器：Android 13+ 走 Photo Picker（免权限），旧系统自动回退
-    // 追加模式：多次选择会累计图片（去重，上限 MAX_IMAGES 张）
-    private val pickImages = registerForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia(MAX_IMAGES)
-    ) { uris ->
-        if (uris.isNotEmpty()) {
-            var added = 0
-            for (u in uris) {
-                if (!images.contains(u) && images.size < MAX_IMAGES) {
-                    images.add(u)
-                    added++
-                }
-            }
-            if (added == 0 && images.size >= MAX_IMAGES) {
-                toast(getString(R.string.max_images))
-            }
-            refresh()
+    // 选图
+    private val pickImage = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) handlePicked(uri, false)
+    }
+    private val pickReplace = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            val bmp = canvas.loadBitmapFromUri(uri)
+            if (bmp != null) canvas.rebindImage(uri, bmp)
         }
     }
+    private val pickForGrid = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
+        if (uris.isNotEmpty()) setupGrid(uris)
+    }
+    private val pickMultiple = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
+        if (uris.isNotEmpty()) handlePickedMultiple(uris)
+    }
+
+    private var curUris: List<Uri> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        gridPreview = findViewById(R.id.gridPreview)
-        tvCount = findViewById(R.id.tvCount)
-        modeSpinner = findViewById(R.id.modeSpinner)
-        gridOption = findViewById(R.id.gridOption)
-        spCols = findViewById(R.id.spCols)
-        seekGap = findViewById(R.id.seekGap)
-        seekRadius = findViewById(R.id.seekRadius)
-        tvGap = findViewById(R.id.tvGap)
-        tvRadius = findViewById(R.id.tvRadius)
-        colorRow = findViewById(R.id.colorRow)
-        styleGroup = findViewById(R.id.styleGroup)
-        smartHint = findViewById(R.id.smartHint)
-        btnMerge = findViewById(R.id.btnMerge)
+        canvas = findViewById(R.id.canvas)
+        gridView = findViewById(R.id.gridView)
+        modeList = findViewById(R.id.modeList)
+        leftListContainer = findViewById(R.id.leftListContainer)
+        rightPanel = findViewById(R.id.rightPanel)
+        propContainer = findViewById(R.id.propContainer)
+        tvNoSelection = findViewById(R.id.tvNoSelection)
+        tvPanelTitle = findViewById(R.id.tvPanelTitle)
+        tvTitle = findViewById(R.id.tvTitle)
 
-        findViewById<Button>(R.id.btnPick).setOnClickListener {
-            pickImages.launch(
-                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-            )
-        }
+        canvas.onSelectionChanged = { refreshPropertyPanel() }
 
-        // 只有「网格」模式才有列数选项
-        modeSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, position: Int, id: Long) {
-                gridOption.visibility = if (position == MODE_GRID) View.VISIBLE else View.GONE
-                // 智能长图忽略间距/圆角：禁用以消除困惑并给出说明
-                val isSmart = position == MODE_SMART
-                styleGroup.isEnabled = !isSmart
-                for (i in 0 until styleGroup.childCount) {
-                    setChildrenEnabled(styleGroup.getChildAt(i), !isSmart)
-                }
-                smartHint.visibility = if (isSmart) View.VISIBLE else View.GONE
+        bindBoardPanel()
+
+        // 顶栏
+        findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
+        findViewById<View>(R.id.btnSave).setOnClickListener { mergeAndShare() }
+
+        // 底部
+        findViewById<View>(R.id.btnAdd).setOnClickListener { addImage() }
+        findViewById<View>(R.id.btnRandom).setOnClickListener { canvas.randomizeLayout() }
+        findViewById<View>(R.id.btnSegmentAll).setOnClickListener { segmentAllImages() }
+        val seekZoom = findViewById<SeekBar>(R.id.seekZoom)
+        seekZoom.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
+                canvas.canvasScale = (p / 100f).coerceIn(0.3f, 3f)
+                canvas.invalidate()
             }
-
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        }
-
-        seekGap.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
-                tvGap.text = "${progress}px"
-                // 拖动时即时刷新缩略图，所见即所得
-                if (fromUser) gridPreview.invalidateViews()
-            }
-
-            override fun onStartTrackingTouch(sb: SeekBar?) {}
-            override fun onStopTrackingTouch(sb: SeekBar?) {}
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
         })
 
-        seekRadius.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
-                tvRadius.text = "${progress}px"
-                if (fromUser) gridPreview.invalidateViews()
-            }
+        // 右侧属性
+        bindPropertyPanel()
 
-            override fun onStartTrackingTouch(sb: SeekBar?) {}
-            override fun onStopTrackingTouch(sb: SeekBar?) {}
-        })
+        // 左侧模式导航（动态构建，避免 RecyclerView 依赖）
+        buildModeList()
 
-        btnMerge.setOnClickListener { merge() }
-        buildColorRow()
-        refresh()
+        selectMode("free")
+        refreshPropertyPanel()
     }
 
-    // ---------- 边框/背景色色块 ----------
-    private fun buildColorRow() {
-        colorRow.removeAllViews()
-        val accent = 0xFF2196F3.toInt()
-        colors.forEachIndexed { i, c ->
-            // 用 FrameLayout 包裹，选中时叠加对勾，便于在白块上也清晰可见
-            val frame = FrameLayout(this)
-            frame.layoutParams = LinearLayout.LayoutParams(dp(30), dp(30)).apply {
-                marginEnd = dp(8)
-            }
-            val v = View(this)
-            v.layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-            val bg = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(c)
-                if (i == selectedColor) {
-                    setStroke(dp(4), accent)
-                } else {
-                    setStroke(dp(1), 0x66000000)
+    private fun buildModeList() {
+        modeList.removeAllViews()
+        for (m in modes) {
+            val v = LayoutInflater.from(this).inflate(R.layout.item_mode, modeList, false)
+            v.findViewById<ImageView>(R.id.modeIcon).setImageResource(m.icon)
+            v.findViewById<TextView>(R.id.modeLabel).setText(m.label)
+            v.setBackgroundResource(if (m.id == mode) R.drawable.bg_mode_tab_sel else R.drawable.bg_mode_tab)
+            v.setOnClickListener {
+                mode = m.id
+                for (i in 0 until modeList.childCount) {
+                    modeList.getChildAt(i).setBackgroundResource(R.drawable.bg_mode_tab)
                 }
+                v.setBackgroundResource(R.drawable.bg_mode_tab_sel)
+                selectMode(m.id)
             }
-            v.background = bg
-            frame.addView(v)
-            if (i == selectedColor) {
-                val check = TextView(this).apply {
-                    text = "✓"
-                    setTextColor(if (isLightColor(c)) accent else Color.WHITE)
-                    textSize = 16f
-                    gravity = android.view.Gravity.CENTER
-                    layoutParams = FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                    )
-                }
-                frame.addView(check)
-            }
-            frame.setOnClickListener {
-                selectedColor = i
-                buildColorRow()
-            }
-            colorRow.addView(frame)
+            modeList.addView(v)
         }
     }
 
-    /** 判断颜色是否为浅色（用于决定对勾颜色，避免白底白字看不清） */
-    private fun isLightColor(c: Int): Boolean {
-        val r = (c shr 16) and 0xFF
-        val g = (c shr 8) and 0xFF
-        val b = c and 0xFF
-        // 感知亮度（ITU-R BT.601）
-        return (0.299 * r + 0.587 * g + 0.114 * b) > 150
-    }
-
-    private fun refresh() {
-        tvCount.text = getString(R.string.count_hint, images.size)
-        gridPreview.adapter = ThumbAdapter()
-    }
-
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
-
-    /** 递归启停 ViewGroup 内所有子控件（用于智能长图禁用间距/圆角） */
-    private fun setChildrenEnabled(view: View, enabled: Boolean) {
-        view.isEnabled = enabled
-        if (view is ViewGroup) {
-            for (i in 0 until view.childCount) {
-                setChildrenEnabled(view.getChildAt(i), enabled)
+    private fun selectMode(id: String) {
+        mode = id
+        tvTitle.setText(
+            when (id) {
+                "grid" -> R.string.mode_grid
+                "free" -> R.string.mode_free
+                "poster" -> R.string.mode_poster
+                "puzzle" -> R.string.mode_puzzle
+                else -> R.string.title_collage
             }
-        }
-    }
-
-    // ---------- 缩略图适配器（末尾固定一个「+」添加格；点图弹菜单：前移/后移/删除） ----------
-    private inner class ThumbAdapter : BaseAdapter() {
-        override fun getCount(): Int = images.size + 1
-
-        override fun getItem(position: Int): Any =
-            if (position < images.size) images[position] else Unit
-
-        override fun getItemId(position: Int): Long = position.toLong()
-
-        override fun getViewTypeCount(): Int = 2
-
-        override fun getItemViewType(position: Int): Int =
-            if (position == images.size) 1 else 0
-
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            // 末尾「+」添加格：点它加图
-            if (position == images.size) {
-                val v = convertView ?: layoutInflater.inflate(R.layout.item_add, parent, false)
-                v.setOnClickListener {
-                    pickImages.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                }
-                return v
-            }
-            val root = convertView ?: layoutInflater.inflate(R.layout.item_thumb, parent, false)
-            root.findViewById<ImageView>(R.id.thumb)
-                .setImageBitmap(decode(images[position], dp(150)))
-            // 已抠图角标
-            root.findViewById<TextView>(R.id.badgeSeg).visibility =
-                if (segmentedSet.contains(position)) View.VISIBLE else View.GONE
-            root.findViewById<View>(R.id.btnRemove).setOnClickListener {
-                images.removeAt(position)
-                syncSegmentedSetOnRemove(position)
-                refresh()
-            }
-            root.setOnClickListener { showImageMenu(position) }
-            return root
-        }
-    }
-
-    private fun showImageMenu(p: Int) {
-        val items = arrayOf(
-            getString(R.string.move_prev),
-            getString(R.string.move_next),
-            getString(R.string.segment_person),
-            getString(R.string.del)
         )
-        AlertDialog.Builder(this)
-            .setItems(items) { _, which ->
-                when (which) {
-                    0 -> if (p > 0) {
-                        val t = images[p]; images[p] = images[p - 1]; images[p - 1] = t
-                        // 同步已抠图角标：交换两处标记
-                        val a = segmentedSet.contains(p)
-                        val b = segmentedSet.contains(p - 1)
-                        segmentedSet.apply {
-                            if (a) add(p - 1) else remove(p - 1)
-                            if (b) add(p) else remove(p)
-                        }
-                        refresh()
-                    } else {
-                        toast(getString(R.string.already_first))
-                    }
-                    1 -> if (p < images.size - 1) {
-                        val t = images[p]; images[p] = images[p + 1]; images[p + 1] = t
-                        val a = segmentedSet.contains(p)
-                        val b = segmentedSet.contains(p + 1)
-                        segmentedSet.apply {
-                            if (a) add(p + 1) else remove(p + 1)
-                            if (b) add(p) else remove(p)
-                        }
-                        refresh()
-                    } else {
-                        toast(getString(R.string.already_last))
-                    }
-                    2 -> segmentImage(p)
-                    3 -> {
-                        images.removeAt(p)
-                        syncSegmentedSetOnRemove(p)
-                        refresh()
-                    }
-                }
+        when (id) {
+            "grid" -> {
+                canvas.visibility = View.GONE
+                gridView.visibility = View.VISIBLE
+                buildGridTemplates()
             }
-            .show()
-    }
-
-    // ---------- 人像抠图（本地推理） ----------
-    // 抠图结果保存为透明 PNG（app 私有目录），替换原图参与拼接。
-    // 进度反馈用独立 Toast，不占用「合成并保存」按钮，避免用户误以为 App 卡死。
-    private fun segmentImage(p: Int) {
-        val uri = images[p]
-        toast(getString(R.string.segmenting))
-        Thread {
-            val result = try {
-                val bmp = decode(uri, 1024) ?: throw IllegalStateException("图片解码失败")
-                segmentPerson(bmp)
-            } catch (e: Exception) {
-                Log.e(TAG, "抠图异常", e)
-                null
+            "free" -> {
+                canvas.visibility = View.VISIBLE
+                gridView.visibility = View.GONE
+                buildFreeAssets()
             }
-            runOnUiThread {
-                if (result != null) {
-                    try {
-                        val dir = File(filesDir, "segment").apply { mkdirs() }
-                        val png = File(dir, "seg_${System.currentTimeMillis()}.png")
-                        png.outputStream().use { result.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                        result.recycle()
-                        // 换成 FileProvider uri，后续 decode/合成照常工作
-                        images[p] = FileProvider.getUriForFile(this, "$packageName.fileprovider", png)
-                        // 记录已抠图位置，供缩略图显示角标
-                        segmentedSet.add(p)
-                        refresh()
-                        toast(getString(R.string.segment_ok))
-                    } catch (e: Exception) {
-                        Log.e(TAG, "保存抠图结果失败", e)
-                        toast(getString(R.string.segment_fail))
-                    }
-                } else {
-                    toast(getString(R.string.segment_fail))
-                }
+            "poster" -> {
+                canvas.visibility = View.VISIBLE
+                gridView.visibility = View.GONE
+                buildPosterTemplates()
             }
-        }.start()
-    }
-
-    /**
-     * 人像抠图总入口：优先用 TFLite（MODNet/RMBG，质量更高），失败再回退 MediaPipe Selfie Segmenter。
-     * 两条路径最终都复用 applyMask() 的「缩放 + alpha」后处理逻辑。
-     */
-    private fun segmentPerson(bmp: Bitmap): Bitmap? {
-        return try {
-            segmentPersonTflite(bmp)
-        } catch (e: Exception) {
-            Log.w(TAG, "TFLite 抠图失败，回退 MediaPipe", e)
-            segmentPersonMediaPipe(bmp)
-        }
-    }
-
-    /** TFLite 原生推理（u2net_human_seg），返回带 alpha 的抠图位图 */
-    private fun segmentPersonTflite(bmp: Bitmap): Bitmap? {
-        val interpreter = Interpreter(loadModelMapped())
-        return try {
-            // u2net_human_seg 输入 1xHxWx3（NHWC），固定边长；保持长宽比 letterbox 填充
-            val inSize = U2NET_INPUT_SIZE // 320
-            val (inBmp, offX, offY, usedW, usedH) = resizeKeepRatio(bmp, inSize)
-            val input = preprocessU2net(inBmp, inSize) // FloatArray [1,H,W,3]，ImageNet 归一化
-            // 输出 1xHxWx1 单通道 0~1（已 sigmoid）
-            val out = Array(1) { Array(inSize) { Array(inSize) { FloatArray(1) } } }
-            interpreter.run(input, out)
-            // 取出有效区内单通道 mask 为一维数组（仅人物绘制区，排除黑边）
-            val mask = FloatArray(usedW * usedH)
-            for (y in 0 until usedH) for (x in 0 until usedW) {
-                mask[y * usedW + x] = out[0][offY + y][offX + x][0]
-            }
-            // 把有效区 mask 映射回原图（按等比缩放比例，避免 letterbox 黑边导致错位）
-            applyMask(bmp, mask, usedW, usedH)
-        } catch (e: Exception) {
-            Log.e(TAG, "TFLite 人像推理失败", e)
-            null
-        } finally {
-            interpreter.close()
-        }
-    }
-
-    /** MediaPipe Selfie Segmenter 兜底路径（原实现） */
-    private fun segmentPersonMediaPipe(bmp: Bitmap): Bitmap? {
-        val options = ImageSegmenter.ImageSegmenterOptions.builder()
-            .setBaseOptions(
-                BaseOptions.builder()
-                    .setModelAssetPath("selfie_segmenter.tflite")
-                    .setDelegate(Delegate.GPU)  // GPU 下 MediaPipe 会把 mask 结果回拷为 CPU ByteBuffer，便于读取像素
-                    .build()
-            )
-            .setOutputCategoryMask(false)
-            .setOutputConfidenceMasks(true)
-            .build()
-        val segmenter = ImageSegmenter.createFromOptions(this, options)
-        return try {
-            val mpImage = BitmapImageBuilder(bmp).build()
-            val result = segmenter.segment(mpImage)
-            val masks = result.confidenceMasks().orElse(emptyList())
-            // selfie_segmenter 标签：0=背景 1=人像
-            val mask = if (masks.size > 1) masks[1] else if (masks.isNotEmpty()) masks[0] else {
-                Log.e(TAG, "分割未输出置信度 mask")
-                return null
-            }
-            applyMask(bmp, mask)
-        } catch (e: Exception) {
-            Log.e(TAG, "人像分割推理失败", e)
-            null
-        } finally {
-            segmenter.close()
-        }
-    }
-
-    // ---------- TFLite 模型加载 / 预处理 ----------
-
-    /** 从 assets 加载 TFLite 模型为 MappedByteBuffer */
-    private fun loadModelMapped(): MappedByteBuffer {
-        assets.openFd(MODEL_TFLITE).use { afd ->
-            FileInputStream(afd.fileDescriptor).channel.use { fc ->
-                return fc.map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
+            "puzzle" -> {
+                canvas.visibility = View.VISIBLE
+                gridView.visibility = View.GONE
+                buildPuzzleTemplates()
             }
         }
     }
 
-    /**
-     * 保持长宽比缩放并居中填充到 inSize×inSize（letterbox）。
-     * 返回：缩放填充后的 Bitmap，以及有效区在原 inSize 画布中的偏移 (offX, offY) 和尺寸 (usedW, usedH)。
-     * 仅对有效区做 mask 推理与映射，可避免黑边填充导致的轮廓错位。
-     */
-    private data class LetterboxResult(
-        val bmp: Bitmap,
-        val offX: Int,
-        val offY: Int,
-        val usedW: Int,
-        val usedH: Int,
-    )
-
-    private fun resizeKeepRatio(src: Bitmap, inSize: Int): LetterboxResult {
-        val sw = src.width
-        val sh = src.height
-        val scale = minOf(inSize.toFloat() / sw, inSize.toFloat() / sh)
-        val dw = (sw * scale).toInt().coerceAtLeast(1)
-        val dh = (sh * scale).toInt().coerceAtLeast(1)
-        val scaled = Bitmap.createScaledBitmap(src, dw, dh, true)
-        val offX = (inSize - dw) / 2
-        val offY = (inSize - dh) / 2
-        // 居中贴到 inSize×inSize 的黑色画布（黑边区域模型输出背景，不参与 mask 映射）
-        val canvasBmp = Bitmap.createBitmap(inSize, inSize, Bitmap.Config.ARGB_8888)
-        val c = android.graphics.Canvas(canvasBmp)
-        c.drawColor(android.graphics.Color.BLACK)
-        c.drawBitmap(scaled, offX.toFloat(), offY.toFloat(), null)
-        scaled.recycle()
-        return LetterboxResult(canvasBmp, offX, offY, dw, dh)
-    }
-
-    /**
-     * u2net_human_seg 预处理：ARGB_8888 → NHWC FloatArray [1,H,W,3]。
-     * 使用 ImageNet mean/std 归一化（u2net 官方做法），范围约 [-2,2]。
-     * 若抠图全黑/全白，说明模型导出已含归一化，需改回 x/255。
-     */
-    private fun preprocessU2net(bmp: Bitmap, inSize: Int): Array<Array<Array<FloatArray>>> {
-        val px = IntArray(inSize * inSize)
-        bmp.getPixels(px, 0, inSize, 0, 0, inSize, inSize)
-        val input = Array(1) {
-            Array(inSize) { Array(inSize) { FloatArray(3) } }
-        }
-        for (y in 0 until inSize) {
-            for (x in 0 until inSize) {
-                val p = px[y * inSize + x]
-                val r = (p shr 16) and 0xFF
-                val g = (p shr 8) and 0xFF
-                val b = p and 0xFF
-                // ImageNet 归一化
-                input[0][y][x][0] = (r / 255f - 0.485f) / 0.229f
-                input[0][y][x][1] = (g / 255f - 0.456f) / 0.224f
-                input[0][y][x][2] = (b / 255f - 0.406f) / 0.225f
-            }
-        }
-        return input
-    }
-
-    /** 把分割 mask（0~1 置信度）转成 alpha，生成透明背景位图（双线性缩放） */
-    private fun applyMask(bmp: Bitmap, mask: MPImage): Bitmap {
-        val mw = mask.width
-        val mh = mask.height
-        val n = mw * mh
-        val buf = maskBuffer(mask)
-        buf.order(ByteOrder.nativeOrder())
-        buf.rewind()
-        val floats = FloatArray(n)
-        val remaining = buf.remaining()
-        when {
-            // FLOAT32
-            remaining >= n * 4 -> buf.asFloatBuffer().get(floats)
-            // FLOAT16
-            remaining >= n * 2 -> for (i in 0 until n) floats[i] = halfToFloat(buf.short)
-            // UINT8
-            else -> for (i in 0 until n) floats[i] = (buf.get().toInt() and 0xFF) / 255f
-        }
-        return applyMask(bmp, floats, mw, mh)
-    }
-
-    /** applyMask 核心：float mask 双线性缩放 + alpha 合成（两条推理路径共用） */
-    private fun applyMask(bmp: Bitmap, mask: FloatArray, mw: Int, mh: Int): Bitmap {
-        val w = bmp.width
-        val h = bmp.height
-        // mask 缩放到原图尺寸（双线性）
-        val alpha = FloatArray(w * h)
-        val sxScale = (mw - 1).toFloat() / (w - 1).toFloat()
-        val syScale = (mh - 1).toFloat() / (h - 1).toFloat()
-        for (y in 0 until h) {
-            val fy = (y * syScale).coerceAtMost(mh - 1f)
-            val y0 = fy.toInt()
-            val y1 = minOf(y0 + 1, mh - 1)
-            val wy = fy - y0
-            val rowBase = y * w
-            for (x in 0 until w) {
-                val fx = (x * sxScale).coerceAtMost(mw - 1f)
-                val x0 = fx.toInt()
-                val x1 = minOf(x0 + 1, mw - 1)
-                val wx = fx - x0
-                val v = mask[y0 * mw + x0] * (1 - wx) * (1 - wy) +
-                    mask[y0 * mw + x1] * wx * (1 - wy) +
-                    mask[y1 * mw + x0] * (1 - wx) * wy +
-                    mask[y1 * mw + x1] * wx * wy
-                alpha[rowBase + x] = v
-            }
-        }
-
-        // 原图 RGB + mask alpha
-        // 阈值硬切 + 羽化：置信度低于(THRESHOLD-FEATHER)当背景(全透明)，
-        // 高于(THRESHOLD+FEATHER)当前景(不透明)，中间线性过渡，消除半透明残影。
-        val lo = MASK_THRESHOLD - MASK_FEATHER
-        val hi = MASK_THRESHOLD + MASK_FEATHER
-        val span = (hi - lo).coerceAtLeast(1e-4f)
-        val px = IntArray(w * h)
-        bmp.getPixels(px, 0, w, 0, 0, w, h)
-        for (i in px.indices) {
-            val raw = alpha[i]
-            val a = when {
-                raw <= lo -> 0f
-                raw >= hi -> 1f
-                else -> (raw - lo) / span
-            }
-            val ai = (a * 255f).toInt().coerceIn(0, 255)
-            px[i] = (px[i] and 0x00FFFFFF) or (ai shl 24)
-        }
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        out.setPixels(px, 0, w, 0, 0, w, h)
-        return out
-    }
-
-    /**
-     * 读取 mask 像素 Buffer。
-     * 使用 MediaPipe 官方公开的 ByteBufferExtractor.extract()，兼容 CPU / GPU / OpenCL
-     * 任意存储类型，避免反射内部容器（旧实现在 0.10.35 下 mask 以 OpenCL 容器返回导致失败）。
-     */
-    private fun maskBuffer(mask: MPImage): ByteBuffer {
-        return ByteBufferExtractor.extract(mask)
-    }
-
-    /** IEEE 754 半精度浮点转单精度（Android Half 需要 API 26，手动实现兼容 minSdk 24） */
-    private fun halfToFloat(h: Short): Float {
-        val bits = h.toInt() and 0xFFFF
-        val sign = if ((bits and 0x8000) != 0) -1f else 1f
-        val exp = (bits shr 10) and 0x1F
-        val frac = bits and 0x3FF
-        return when {
-            exp == 0 -> sign * (frac / 1024f) * 2f.pow(1 - 15)
-            exp == 31 -> if (frac == 0) sign * Float.POSITIVE_INFINITY else Float.NaN
-            else -> sign * (1 + frac / 1024f) * 2f.pow(exp - 15)
-        }
-    }
-
-    // ---------- 图片解码（含 EXIF 旋转修正、按目标边长降采样） ----------
-    // 注意1：inJustDecodeBounds=true 时 BitmapFactory.decodeStream 恒返回 null（只填尺寸），
-    //       绝不能把返回值当失败判断 —— 这是之前"合成失败"的根因。
-    // 注意2：EXIF 读取对 HEIC/HEIF 等格式可能抛异常，必须单独容错。
-    private fun decode(uri: Uri, targetSide: Int): Bitmap? {
-        val tag = uri.lastPathSegment ?: uri.toString()
-        return try {
-            // 阶段1：读尺寸
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            contentResolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, bounds)
-            }
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-                Log.e(TAG, "无法读取图片尺寸: $tag (w=${bounds.outWidth} h=${bounds.outHeight})")
-                return null
-            }
-
-            // 阶段2：按目标边长降采样解码
-            var sample = 1
-            while (bounds.outWidth / sample > targetSide || bounds.outHeight / sample > targetSide) {
-                sample *= 2
-            }
-            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-            val bmp = contentResolver.openInputStream(uri)?.use {
-                BitmapFactory.decodeStream(it, null, opts)
-            } ?: run {
-                Log.e(TAG, "图片解码失败(采样阶段): $tag sample=$sample")
-                return null
-            }
-
-            // 阶段3：EXIF 旋转标记读取，失败就当正常方向，绝不影响主图
-            val orientation = try {
-                contentResolver.openInputStream(uri)?.use {
-                    ExifInterface(it).getAttributeInt(
-                        ExifInterface.TAG_ORIENTATION,
-                        ExifInterface.ORIENTATION_NORMAL
-                    )
-                } ?: ExifInterface.ORIENTATION_NORMAL
-            } catch (e: Exception) {
-                Log.w(TAG, "EXIF 读取失败（可能是 HEIC 等格式）：$tag", e)
-                ExifInterface.ORIENTATION_NORMAL
-            }
-
-            // 阶段4：按 EXIF 旋转转正
-            try {
-                when (orientation) {
-                    ExifInterface.ORIENTATION_ROTATE_90 -> rotate(bmp, 90f)
-                    ExifInterface.ORIENTATION_ROTATE_180 -> rotate(bmp, 180f)
-                    ExifInterface.ORIENTATION_ROTATE_270 -> rotate(bmp, 270f)
-                    else -> bmp
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "图片旋转失败，使用原方向", e)
-                bmp
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "图片解码异常: $tag", e)
-            null
-        }
-    }
-
-    private fun rotate(bmp: Bitmap, deg: Float): Bitmap {
-        val m = Matrix().apply { postRotate(deg) }
-        val out = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-        if (out !== bmp) bmp.recycle()
-        return out
-    }
-
-    // ---------- 拼接合成 ----------
-    private fun merge() {
-        if (images.isEmpty()) {
-            toast(getString(R.string.err_no_images))
+    // 左侧列表：自由模式 -> 已添加图片（图层式列表）
+    private fun buildFreeAssets() {
+        leftListContainer.removeAllViews()
+        val title = TextView(this).apply { setText(R.string.images); setTextSize(12f); setTextColor(0x888888); }
+        leftListContainer.addView(title)
+        if (canvas.elements.isEmpty()) {
+            val empty = TextView(this).apply { setText("点击下方“添加图片”"); setTextSize(12f); setTextColor(0x9AA0A6); }
+            leftListContainer.addView(empty)
             return
         }
-        val mode = modeSpinner.selectedItemPosition
-        val cols = spCols.selectedItem.toString().toInt()
-        val gap = seekGap.progress
-        val radius = seekRadius.progress
-        val bg = colors[selectedColor]
-        val btn = btnMerge
-        btn.isEnabled = false
-        btn.text = getString(R.string.merging)
-
-        // 合成放后台线程，避免大图卡 UI
-        Thread {
-            val bmp = try {
-                mergeImages(mode, gap, radius, bg)
-            } catch (e: Exception) {
-                Log.e(TAG, "合成异常", e)
-                null
+        canvas.elements.sortedByDescending { it.zOrder }.forEachIndexed { idx, el ->
+            val row = TextView(this).apply {
+                text = if (el is ImageElement) "图片 ${canvas.elements.size - idx}" else "文本"
+                setPadding(8, 10, 8, 10)
+                setBackgroundResource(R.drawable.bg_mode_tab)
+                setOnClickListener { canvas.selectElement(el); refreshPropertyPanel() }
             }
-            runOnUiThread {
-                btn.isEnabled = true
-                btn.setText(R.string.merge_save)
-                if (bmp != null) {
-                    showPreviewDialog(bmp)
-                } else {
-                    toast(getString(R.string.merge_fail))
+            leftListContainer.addView(row)
+        }
+    }
+
+    // 左侧列表：网格模式 -> 模板缩略图（占位）
+    private fun buildGridTemplates() {
+        leftListContainer.removeAllViews()
+        val title = TextView(this).apply { setText(R.string.templates); setTextSize(12f); setTextColor(0x888888); }
+        leftListContainer.addView(title)
+        val tips = TextView(this).apply { setText(R.string.templates_hint); setTextSize(11f); setTextColor(0x9AA0A6); }
+        leftListContainer.addView(tips)
+        val btn = Button(this).apply {
+            text = "选择图片(2-9张)"
+            setOnClickListener { pickForGrid.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+        }
+        leftListContainer.addView(btn)
+    }
+
+    // 阶段5 海报模板
+    private fun buildPosterTemplates() {
+        leftListContainer.removeAllViews()
+        val title = TextView(this).apply { setText(R.string.templates); setTextSize(12f); setTextColor(0x888888); }
+        leftListContainer.addView(title)
+        val templates = listOf(R.string.template_5, R.string.template_6)
+        templates.forEach { tid ->
+            val btn = Button(this).apply {
+                setText(tid)
+                setOnClickListener { applyPosterTemplate(getString(tid)) }
+            }
+            leftListContainer.addView(btn)
+        }
+    }
+
+    // 阶段5 拼图模板
+    private fun buildPuzzleTemplates() {
+        leftListContainer.removeAllViews()
+        val title = TextView(this).apply { setText(R.string.templates); setTextSize(12f); setTextColor(0x888888); }
+        leftListContainer.addView(title)
+        val templates = listOf(R.string.template_1, R.string.template_2, R.string.template_3, R.string.template_4)
+        templates.forEach { tid ->
+            val btn = Button(this).apply {
+                setText(tid)
+                setOnClickListener { applyPuzzleTemplate(getString(tid)) }
+            }
+            leftListContainer.addView(btn)
+        }
+    }
+
+    // ---------- 右侧属性面板 ----------
+    private fun bindPropertyPanel() {
+        findViewById<View>(R.id.btnReplace).setOnClickListener { pickReplace.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+        findViewById<View>(R.id.btnCrop).setOnClickListener { openCrop() }
+        findViewById<View>(R.id.btnFilter).setOnClickListener { openFilter() }
+        findViewById<View>(R.id.btnMask).setOnClickListener { openMask() }
+        findViewById<View>(R.id.btnSegment).setOnClickListener { openSegment() }
+        // 手动修正：进入/退出蒙版编辑
+        findViewById<View>(R.id.btnRefine).setOnClickListener {
+            val el = canvas.selected as? ImageElement ?: return@setOnClickListener
+            val enter = !el.inMaskEdit
+            canvas.setMaskEdit(enter)
+            refreshRefineUI(enter)
+            if (enter) refreshPropertyPanel() else refreshPropertyPanel()
+        }
+        findViewById<View>(R.id.btnErase).setOnClickListener { canvas.brushMode = FreeCanvasView.MaskBrush.ERASE }
+        findViewById<View>(R.id.btnPaint).setOnClickListener { canvas.brushMode = FreeCanvasView.MaskBrush.PAINT }
+        findViewById<View>(R.id.btnClearMask).setOnClickListener {
+            canvas.clearMaskEdit()
+            refreshRefineUI(false)
+            refreshPropertyPanel()
+        }
+        findViewById<View>(R.id.btnDoneMask).setOnClickListener {
+            canvas.exitMaskEdit()
+            refreshRefineUI(false)
+            refreshPropertyPanel()
+        }
+        val seekBrush = findViewById<SeekBar>(R.id.seekBrush)
+        seekBrush.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                canvas.brushRadius = p.toFloat().coerceAtLeast(4f)
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        canvas.brushRadius = seekBrush.progress.toFloat().coerceAtLeast(4f)
+
+        val seekOpacity = findViewById<SeekBar>(R.id.seekOpacity)
+        seekOpacity.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { canvas.setElementAlpha(p / 100f) }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+
+        val toggleLock = findViewById<ToggleButton>(R.id.toggleLock)
+        toggleLock.setOnCheckedChangeListener { _, isChecked ->
+            canvas.selected?.let { it.locked = isChecked; canvas.invalidate() }
+        }
+
+        findViewById<View>(R.id.btnAlignLeft).setOnClickListener { canvas.alignLeft() }
+        findViewById<View>(R.id.btnAlignCenterH).setOnClickListener { canvas.alignCenterH() }
+        findViewById<View>(R.id.btnAlignRight).setOnClickListener { canvas.alignRight() }
+        findViewById<View>(R.id.btnAlignTop).setOnClickListener { canvas.alignTop() }
+        findViewById<View>(R.id.btnAlignCenterV).setOnClickListener { canvas.alignCenterV() }
+        findViewById<View>(R.id.btnAlignBottom).setOnClickListener { canvas.alignBottom() }
+        findViewById<View>(R.id.btnDistributeH).setOnClickListener { canvas.distributeH() }
+        findViewById<View>(R.id.btnDistributeV).setOnClickListener { canvas.distributeV() }
+        findViewById<View>(R.id.btnLayerFront).setOnClickListener { canvas.bringToFrontLayer() }
+        findViewById<View>(R.id.btnLayerBack).setOnClickListener { canvas.sendToBack() }
+        findViewById<View>(R.id.btnLayerUp).setOnClickListener { canvas.moveLayerUp() }
+        findViewById<View>(R.id.btnLayerDown).setOnClickListener { canvas.moveLayerDown() }
+        findViewById<View>(R.id.btnDelete).setOnClickListener { canvas.deleteSelected(); refreshPropertyPanel() }
+    }
+
+    private fun bindBoardPanel() {
+        val metrics = resources.displayMetrics
+        val dip = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1f, metrics)
+
+        // 背景色色块
+        val bgColors = listOf(
+            0xFFFFFFFF.toInt(), 0xFFF5F5F5.toInt(), 0xFFECEFF1.toInt(), 0xFFCFD8DC.toInt(), 0xFF9E9E9E.toInt(), 0xFF616161.toInt(), 0xFF212121.toInt(), 0xFF000000.toInt(),
+            0xFFE53935.toInt(), 0xFFD81B60.toInt(), 0xFF8E24AA.toInt(), 0xFF5E35B1.toInt(), 0xFF1E88E5.toInt(), 0xFF00ACC1.toInt(), 0xFF00897B.toInt(), 0xFF43A047.toInt(),
+            0xFFFDD835.toInt(), 0xFFFFB300.toInt(), 0xFFFB8C00.toInt(), 0xFFF4511E.toInt(), 0xFF6D4C41.toInt(), 0xFF90A4AE.toInt()
+        )
+        val bgRow = findViewById<LinearLayout>(R.id.bgColorRow)
+        val swatch = (20 * dip).toInt()
+        bgColors.forEach { color ->
+            val drawable = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(color)
+                setStroke((1.5f * dip).toInt(), 0xFFCCCCCC.toInt())
+            }
+            val v = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(swatch, swatch).apply {
+                    marginEnd = (5 * dip).toInt()
                 }
+                background = drawable
+                setOnClickListener { canvas.bgColor = color }
+            }
+            bgRow.addView(v)
+        }
+
+        // 自定义颜色按钮
+        val customBg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(0xFFFAFAFA.toInt())
+            setStroke((1.5f * dip).toInt(), 0xFF90A4AE.toInt())
+        }
+        val customView = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(swatch, swatch).apply {
+                marginEnd = (5 * dip).toInt()
+            }
+            background = customBg
+            setOnClickListener { showColorPicker() }
+        }
+        val plus = android.widget.TextView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(swatch, swatch)
+            gravity = android.view.Gravity.CENTER
+            text = "+"
+            textSize = 16f
+            setTextColor(0xFF37474F.toInt())
+        }
+        val customWrap = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(swatch, swatch).apply {
+                marginEnd = (5 * dip).toInt()
+            }
+            addView(customView)
+            addView(plus)
+            setOnClickListener { showColorPicker() }
+        }
+        bgRow.addView(customWrap)
+
+        // 尺寸比例按钮（null 表示"屏幕分辨率"选项）
+        val sizes = listOf<Pair<String, Pair<Float, Float>?>>(
+            "size_screen" to null,
+            "size_square" to (1f to 1f),
+            "size_4_3" to (4f to 3f),
+            "size_3_4" to (3f to 4f),
+            "size_16_9" to (16f to 9f),
+            "size_9_16" to (9f to 16f)
+        )
+        val base = 1080f
+        val sizeRow = findViewById<LinearLayout>(R.id.sizeRow)
+        sizes.forEach { (nameRes, ratio) ->
+            val btn = Button(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    (44 * dip).toInt(),
+                    (30 * dip).toInt()
+                ).apply { marginEnd = (4 * dip).toInt() }
+                text = getString(resources.getIdentifier(nameRes, "string", packageName))
+                textSize = 10f
+                val action: () -> Unit = if (ratio == null) {
+                    { canvas.useScreenResolution() }
+                } else {
+                    val (rw, rh) = ratio
+                    val w = base * rw
+                    val h = base * rh
+                    { canvas.setCanvasSize(w, h) }
+                }
+                setOnClickListener { action() }
+            }
+            sizeRow.addView(btn)
+        }
+    }
+
+    /** 自定义背景色调色板：RGB 三滑动条 + 实时预览 */
+    private fun showColorPicker() {
+        val metrics = resources.displayMetrics
+        val dip = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1f, metrics)
+
+        // 当前颜色（默认白）
+        var cur = canvas.bgColor
+
+        val preview = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (44 * dip).toInt()
+            )
+            background = GradientDrawable().apply {
+                setColor(cur)
+                setStroke((1f * dip).toInt(), 0xFFCCCCCC.toInt())
+            }
+        }
+
+        fun makeSeek(initial: Int, onChanged: (Int) -> Unit): SeekBar {
+            return SeekBar(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                max = 255
+                progress = initial
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                        onChanged(p)
+                    }
+                    override fun onStartTrackingTouch(s: SeekBar?) {}
+                    override fun onStopTrackingTouch(s: SeekBar?) {}
+                })
+            }
+        }
+
+        val rSeek = makeSeek(Color.red(cur)) { r -> cur = Color.argb(255, r, Color.green(cur), Color.blue(cur)); preview.background = GradientDrawable().apply { setColor(cur); setStroke((1f * dip).toInt(), 0xFFCCCCCC.toInt()) } }
+        val gSeek = makeSeek(Color.green(cur)) { g -> cur = Color.argb(255, Color.red(cur), g, Color.blue(cur)); preview.background = GradientDrawable().apply { setColor(cur); setStroke((1f * dip).toInt(), 0xFFCCCCCC.toInt()) } }
+        val bSeek = makeSeek(Color.blue(cur)) { b -> cur = Color.argb(255, Color.red(cur), Color.green(cur), b); preview.background = GradientDrawable().apply { setColor(cur); setStroke((1f * dip).toInt(), 0xFFCCCCCC.toInt()) } }
+
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((16 * dip).toInt(), (16 * dip).toInt(), (16 * dip).toInt(), (16 * dip).toInt())
+            addView(preview)
+            addView(TextView(this@MainActivity).apply { text = "R"; textSize = 12f; setTextColor(0xFF616161.toInt()); setPadding(0, (8 * dip).toInt(), 0, 0) })
+            addView(rSeek)
+            addView(TextView(this@MainActivity).apply { text = "G"; textSize = 12f; setTextColor(0xFF616161.toInt()) })
+            addView(gSeek)
+            addView(TextView(this@MainActivity).apply { text = "B"; textSize = 12f; setTextColor(0xFF616161.toInt()) })
+            addView(bSeek)
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(R.string.custom_color)
+            .setView(panel)
+            .setPositiveButton(android.R.string.ok) { _, _ -> canvas.bgColor = cur }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun refreshPropertyPanel() {
+        val el = canvas.selected
+        if (el == null) {
+            propContainer.visibility = View.GONE
+            tvPanelTitle.visibility = View.GONE
+            tvNoSelection.visibility = View.GONE
+            return
+        }
+        propContainer.visibility = View.VISIBLE
+        tvPanelTitle.visibility = View.VISIBLE
+        tvNoSelection.visibility = View.GONE
+        val seekOpacity = findViewById<SeekBar>(R.id.seekOpacity)
+        seekOpacity.progress = (el.alpha * 100).toInt()
+        val toggleLock = findViewById<ToggleButton>(R.id.toggleLock)
+        toggleLock.isChecked = el.locked
+        // 文本元素不支持裁剪/滤镜/蒙版/替换
+        val isImg = el is ImageElement
+        listOf(R.id.btnReplace, R.id.btnCrop, R.id.btnFilter, R.id.btnMask).forEach {
+            findViewById<View>(it).visibility = if (isImg) View.VISIBLE else View.GONE
+        }
+        // 手动修正按钮：仅对去除背景(已抠图)的图片可用
+        val canRefine = isImg && (el as? ImageElement)?.segmented == true
+        findViewById<View>(R.id.btnRefine).visibility = if (canRefine) View.VISIBLE else View.GONE
+        // 未进入修正模式时，工具条/笔刷条隐藏
+        val inEdit = (el as? ImageElement)?.inMaskEdit == true
+        if (!inEdit) {
+            findViewById<View>(R.id.refineToolbar).visibility = View.GONE
+            findViewById<View>(R.id.brushSizeRow).visibility = View.GONE
+        }
+        // 自由模式下刷新左侧图片列表
+        if (mode == "free") buildFreeAssets()
+    }
+
+    /** 切换手动修正工具条/笔刷条的可见性 */
+    private fun refreshRefineUI(editing: Boolean) {
+        findViewById<View>(R.id.refineToolbar).visibility = if (editing) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.brushSizeRow).visibility = if (editing) View.VISIBLE else View.GONE
+        // 修正模式下，隐藏其他图片操作按钮避免误触
+        val editVis = if (editing) View.GONE else View.VISIBLE
+        listOf(R.id.btnReplace, R.id.btnCrop, R.id.btnFilter, R.id.btnMask, R.id.btnSegment, R.id.btnRefine)
+            .forEach { findViewById<View>(it).visibility = editVis }
+    }
+
+    // ---------- 添加图片 ----------
+    private fun addImage() {
+        if (mode == "grid") {
+            pickForGrid.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            return
+        }
+        // 自由/海报/拼图模式：支持一次多选多张图片
+        pickMultiple.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+    }
+
+    private fun handlePickedMultiple(uris: List<Uri>) {
+        when (mode) {
+            "grid" -> setupGrid(uris)
+            "poster", "puzzle" -> uris.forEach { uri ->
+                val bmp = canvas.loadBitmapFromUri(uri) ?: return@forEach
+                addImageToTemplate(uri, bmp)
+            }
+            else -> uris.forEach { uri ->
+                val bmp = canvas.loadBitmapFromUri(uri) ?: return@forEach
+                canvas.addImage(uri, bmp)
+            }
+        }
+    }
+
+    private fun handlePicked(uri: Uri, forGrid: Boolean) {
+        val bmp = canvas.loadBitmapFromUri(uri)
+        if (bmp != null) {
+            when (mode) {
+                "grid" -> setupGrid(listOf(uri))
+                "poster", "puzzle" -> addImageToTemplate(uri, bmp)
+                else -> canvas.addImage(uri, bmp)
+            }
+        }
+    }
+
+    // ---------- 网格模式 ----------
+    private fun setupGrid(uris: List<Uri>) {
+        curUris = uris
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = uris.size
+            override fun getItem(i: Int) = uris[i]
+            override fun getItemId(i: Int) = i.toLong()
+            override fun getView(i: Int, cv: View?, p: ViewGroup?): View {
+                val iv = (cv as? ImageView) ?: ImageView(this@MainActivity).apply {
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                }
+                iv.setImageURI(uris[i])
+                return iv
+            }
+        }
+        gridView.adapter = adapter
+        gridView.visibility = View.VISIBLE
+    }
+
+    private fun mergeGrid(): Bitmap {
+        val n = curUris.size
+        val cols = ceil(sqrt(n.toFloat())).toInt()
+        val rows = ceil(n.toFloat() / cols).toInt()
+        val cell = 1080 / cols
+        val bmp = Bitmap.createBitmap(1080, cell * rows, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        c.drawColor(Color.WHITE)
+        curUris.forEachIndexed { i, uri ->
+            val b = canvas.loadBitmapFromUri(uri) ?: return@forEachIndexed
+            val col = i % cols; val row = i / cols
+            val dst = Rect(col * cell, row * cell, (col + 1) * cell, (row + 1) * cell)
+            c.drawBitmap(b, null, dst, null)
+        }
+        return bmp
+    }
+
+    // ---------- 阶段5 模板应用 ----------
+    private var templateSlots: List<RectF> = emptyList()
+
+    private fun applyPosterTemplate(name: String) {
+        canvas.elements.clear()
+        canvas.bgColor = Color.parseColor("#1A1A2E")
+        templateSlots = when (name) {
+            getString(R.string.template_5) -> listOf(RectF(90f, 120f, 990f, 720f))
+            else -> listOf(RectF(140f, 140f, 940f, 640f))
+        }
+        val text = CanvasElement.TextElement(
+            text = getString(R.string.poster_placeholder),
+            textSizeSp = 56f, color = Color.WHITE,
+            x = 120f, y = 820f, w = 840f, h = 120f, rotation = 0f
+        )
+        text.zOrder = 100
+        canvas.elements.add(text)
+        canvas.selectElement(null)
+        canvas.invalidate()
+        Toast.makeText(this, "已应用$name，点击下方添加图片填充槽位", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun applyPuzzleTemplate(name: String) {
+        canvas.elements.clear()
+        canvas.bgColor = Color.WHITE
+        templateSlots = when (name) {
+            getString(R.string.template_1) -> listOf( // 经典 2x2
+                RectF(40f, 40f, 530f, 530f), RectF(550f, 40f, 1040f, 530f),
+                RectF(40f, 550f, 530f, 1040f), RectF(550f, 550f, 1040f, 1040f))
+            getString(R.string.template_2) -> listOf( // 杂志 左大右两小
+                RectF(40f, 40f, 700f, 1040f), RectF(720f, 40f, 1040f, 520f),
+                RectF(720f, 560f, 1040f, 1040f))
+            getString(R.string.template_3) -> listOf( // 卡片 上大下小
+                RectF(120f, 60f, 960f, 560f), RectF(120f, 600f, 480f, 1000f),
+                RectF(600f, 600f, 960f, 1000f))
+            else -> listOf( // 三联 水平
+                RectF(40f, 120f, 360f, 960f), RectF(380f, 120f, 700f, 960f),
+                RectF(720f, 120f, 1040f, 960f))
+        }
+        canvas.selectElement(null)
+        canvas.invalidate()
+        Toast.makeText(this, "已选择$name，点击下方添加图片填充槽位", Toast.LENGTH_SHORT).show()
+    }
+
+    /** 把图片放入模板下一个空槽位（阶段5 海报/拼图） */
+    private fun addImageToTemplate(uri: Uri, bmp: Bitmap) {
+        val slot = templateSlots.firstOrNull { s ->
+            canvas.elements.none { it is ImageElement && it.x == s.left && it.y == s.top }
+        } ?: templateSlots.firstOrNull()
+        if (slot == null) { canvas.addImage(uri, bmp); return }
+        val aspect = bmp.width.toFloat() / bmp.height
+        val slotAspect = slot.width() / slot.height()
+        val ww: Float; val hh: Float
+        if (slotAspect > aspect) { hh = slot.height(); ww = hh * aspect }
+        else { ww = slot.width(); hh = ww / aspect }
+        val x = slot.left + (slot.width() - ww) / 2f
+        val y = slot.top + (slot.height() - hh) / 2f
+        val el = ImageElement(uri, bmp, x, y, ww, hh, 0f)
+        el.zOrder = (canvas.elements.maxOfOrNull { it.zOrder } ?: 0) + 1
+        canvas.elements.add(el)
+        canvas.selectElement(el)
+        canvas.invalidate()
+    }
+
+    // ---------- 阶段4：裁剪/滤镜/蒙版入口 ----------
+    private fun openCrop() {
+        val el = canvas.selected as? ImageElement ?: return
+        val view = layoutInflater.inflate(R.layout.dialog_crop, null)
+        val cropView = view.findViewById<CropOverlayView>(R.id.cropView)
+        cropView.srcBitmap = el.bitmap
+        val dlg = AlertDialog.Builder(this).setTitle(R.string.crop).setView(view).create()
+        view.findViewById<View>(R.id.btnCancel).setOnClickListener { dlg.dismiss() }
+        view.findViewById<View>(R.id.btnOk).setOnClickListener {
+            val cropped = cropView.resultBitmap()
+            if (cropped != null) {
+                val idx = canvas.elements.indexOf(el)
+                if (idx >= 0) {
+                    canvas.elements[idx] = el.copy(bitmap = cropped,
+                        w = el.w, h = el.w / (cropped.width.toFloat() / cropped.height))
+                }
+                canvas.selectElement(canvas.elements[idx])
+                canvas.invalidate()
+            }
+            dlg.dismiss()
+        }
+        dlg.show()
+    }
+
+    private fun openFilter() {
+        val el = canvas.selected as? ImageElement ?: return
+        val names = ImageFilter.values().map { it.name }
+        AlertDialog.Builder(this).setTitle(R.string.filter)
+            .setItems(names.toTypedArray()) { _, i ->
+                (canvas.selected as? ImageElement)?.filter = ImageFilter.values()[i]
+                canvas.invalidate()
+            }.show()
+    }
+
+    private fun openMask() {
+        val el = canvas.selected as? ImageElement ?: return
+        val names = MaskShape.values().map { it.name }
+        AlertDialog.Builder(this).setTitle(R.string.mask)
+            .setItems(names.toTypedArray()) { _, i ->
+                (canvas.selected as? ImageElement)?.mask = MaskShape.values()[i]
+                canvas.invalidate()
+            }.show()
+    }
+
+    /** 抠人像：对当前选中图片做分割，得到透明背景结果 */
+    private fun openSegment() {
+        val el = canvas.selected as? ImageElement ?: return
+        Toast.makeText(this, R.string.segmenting, Toast.LENGTH_SHORT).show()
+        Thread {
+            val src = el.bitmap
+            val result = Segmenter.segment(this, src)
+            runOnUiThread {
+                if (result == null) {
+                    val msg = Segmenter.lastError?.lineSequence()?.firstOrNull()?.take(120)
+                        ?: getString(R.string.segment_fail)
+                    Toast.makeText(this, getString(R.string.segment_fail) + ": " + msg, Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+                // 替换元素 bitmap 并保持尺寸比例
+                val ratio = result.width.toFloat() / result.height
+                el.bitmap = result
+                el.segmented = true
+                el.w = el.w   // 保持当前宽，高度按新比例重算
+                el.h = el.w / ratio
+                canvas.invalidate()
+                Toast.makeText(this, R.string.segment_ok, Toast.LENGTH_SHORT).show()
             }
         }.start()
     }
 
-    private fun mergeImages(mode: Int, gap: Int, radius: Int, bg: Int): Bitmap? {
-        val list = images.mapNotNull { decode(it, MAX_SIDE) }
-        if (list.isEmpty()) {
-            Log.e(TAG, "所有图片解码失败")
-            return null
+    /** 一键抠图：对画布上所有图片元素逐张抠人像 */
+    private fun segmentAllImages() {
+        val images = canvas.elements.filterIsInstance<ImageElement>()
+        if (images.isEmpty()) {
+            Toast.makeText(this, R.string.err_no_images, Toast.LENGTH_SHORT).show()
+            return
         }
-        val out = when (mode) {
-            MODE_VER -> mergeVertically(list, gap, radius, bg)
-            MODE_GRID -> mergeGrid(list, gap, radius, bg)
-            MODE_SMART -> mergeSmart(list, bg)
-            else -> mergeHorizontally(list, gap, radius, bg)
-        }
-        // 若 out 恰好是列表中的原图引用（单图场景），不能回收它
-        list.forEach { if (it !== out && !it.isRecycled) it.recycle() }
-        return out
-    }
-
-    /** 整图圆角裁剪工具：radius>0 时给整个画布画圆角 mask */
-    private fun clipRound(c: Canvas, w: Int, h: Int, radius: Int) {
-        if (radius > 0) {
-            val path = Path().apply {
-                addRoundRect(
-                    RectF(0f, 0f, w.toFloat(), h.toFloat()),
-                    radius.toFloat(), radius.toFloat(), Path.Direction.CW
-                )
-            }
-            c.clipPath(path)
-        }
-    }
-
-    /** 横向拼接：统一高度对齐，宽度累加 */
-    private fun mergeHorizontally(list: List<Bitmap>, gap: Int, radius: Int, bg: Int): Bitmap {
-        var h = list.maxOf { it.height }
-        var ws = list.map { it.width * h / it.height }
-        val naturalW = ws.sum() + gap * (list.size - 1)
-        if (naturalW > MAX_DIM) {
-            val k = MAX_DIM.toFloat() / naturalW
-            h = (h * k).toInt()
-            ws = ws.map { (it * k).toInt() }
-        }
-        val totalW = ws.sum() + gap * (list.size - 1)
-        val out = Bitmap.createBitmap(totalW, h, Bitmap.Config.ARGB_8888)
-        val c = Canvas(out)
-        c.drawColor(bg)
-        clipRound(c, totalW, h, radius)
-        var x = 0
-        list.forEachIndexed { i, b ->
-            val w = ws[i]
-            val scaled = if (w != b.width || h != b.height) {
-                Bitmap.createScaledBitmap(b, w, h, true)
-            } else {
-                b
-            }
-            c.drawBitmap(scaled, x.toFloat(), 0f, null)
-            x += w + gap
-            if (scaled !== b) scaled.recycle()
-        }
-        return out
-    }
-
-    /** 纵向拼接：统一宽度对齐，高度累加 */
-    private fun mergeVertically(list: List<Bitmap>, gap: Int, radius: Int, bg: Int): Bitmap {
-        var w = list.maxOf { it.width }
-        var hs = list.map { it.height * w / it.width }
-        val naturalH = hs.sum() + gap * (list.size - 1)
-        if (naturalH > MAX_DIM) {
-            val k = MAX_DIM.toFloat() / naturalH
-            w = (w * k).toInt()
-            hs = hs.map { (it * k).toInt() }
-        }
-        val totalH = hs.sum() + gap * (list.size - 1)
-        val out = Bitmap.createBitmap(w, totalH, Bitmap.Config.ARGB_8888)
-        val c = Canvas(out)
-        c.drawColor(bg)
-        clipRound(c, w, totalH, radius)
-        var y = 0
-        list.forEachIndexed { i, b ->
-            val h = hs[i]
-            val scaled = if (h != b.height || w != b.width) {
-                Bitmap.createScaledBitmap(b, w, h, true)
-            } else {
-                b
-            }
-            c.drawBitmap(scaled, 0f, y.toFloat(), null)
-            y += h + gap
-            if (scaled !== b) scaled.recycle()
-        }
-        return out
-    }
-
-    /** 网格拼接：正方形格子，图片中心裁剪铺满，每格可圆角 */
-    private fun mergeGrid(list: List<Bitmap>, gap: Int, radius: Int, bg: Int): Bitmap {
-        val userCols = spCols.selectedItem.toString().toInt()
-        // 图片张数少于列数时按图片数排（保证画布尺寸与摆放一致）
-        val cols = userCols.coerceIn(1, list.size)
-        val rows = ceil(list.size.toDouble() / cols).toInt()
-        val ow = cols * CELL + gap * (cols - 1)
-        val oh = rows * CELL + gap * (rows - 1)
-        val out = Bitmap.createBitmap(ow, oh, Bitmap.Config.ARGB_8888)
-        val c = Canvas(out)
-        c.drawColor(bg)
-
-        list.forEachIndexed { i, b ->
-            val col = i % cols
-            val row = i / cols
-            val x = col * (CELL + gap)
-            val y = row * (CELL + gap)
-            // 等比放大铺满格子，再裁掉溢出部分（center-crop）
-            val scale = max(CELL.toFloat() / b.width, CELL.toFloat() / b.height)
-            val sw = (b.width * scale + 0.5f).toInt()
-            val sh = (b.height * scale + 0.5f).toInt()
-            val scaled = if (sw == b.width && sh == b.height) b
-            else Bitmap.createScaledBitmap(b, sw, sh, true)
-            val sx = (sw - CELL) / 2
-            val sy = (sh - CELL) / 2
-            if (radius > 0) {
-                val path = Path().apply {
-                    addRoundRect(
-                        RectF(x.toFloat(), y.toFloat(), (x + CELL).toFloat(), (y + CELL).toFloat()),
-                        radius.toFloat(), radius.toFloat(), Path.Direction.CW
-                    )
-                }
-                c.save()
-                c.clipPath(path)
-                c.drawBitmap(
-                    scaled,
-                    Rect(sx, sy, sx + CELL, sy + CELL),
-                    Rect(x, y, x + CELL, y + CELL),
-                    null
-                )
-                c.restore()
-            } else {
-                c.drawBitmap(
-                    scaled,
-                    Rect(sx, sy, sx + CELL, sy + CELL),
-                    Rect(x, y, x + CELL, y + CELL),
-                    null
-                )
-            }
-            if (scaled !== b) scaled.recycle()
-        }
-        return out
-    }
-
-    // ---------- 智能长图拼接（重叠行检测，适合截图拼接） ----------
-    /** 在 top 底部与 bottom 顶部之间寻找最佳重叠行数，未检测到重叠返回 0 */
-    private fun findOverlap(top: Bitmap, bottom: Bitmap): Int {
-        val SW = 160
-        val sh1 = (top.height * SW.toLong() / top.width).toInt().coerceAtLeast(1)
-        val sh2 = (bottom.height * SW.toLong() / bottom.width).toInt().coerceAtLeast(1)
-        val st = Bitmap.createScaledBitmap(top, SW, sh1, true)
-        val sb = Bitmap.createScaledBitmap(bottom, SW, sh2, true)
-
-        val tmplLen = minOf(40, st.height / 4)          // 模板行数：顶部图底部 40 行内
-        val searchMax = minOf(sh2 / 2, 800)             // 在底部图前半部分搜索
-        val len = SW * tmplLen
-        val tmpl = IntArray(len)
-        st.getPixels(tmpl, 0, SW, 0, st.height - tmplLen, SW, tmplLen)
-
-        val area = IntArray(SW * (searchMax + tmplLen))
-        sb.getPixels(area, 0, SW, 0, 0, SW, minOf(searchMax + tmplLen, sh2))
-
-        var bestPos = 0
-        var bestScore = Long.MAX_VALUE
-        for (y in 0..searchMax) {
-            var score = 0L
-            for (dy in 0 until tmplLen) {
-                val ty = y + dy
-                if (ty >= sh2) break
-                val baseT = dy * SW
-                val baseA = ty * SW
-                for (x in 0 until SW) {
-                    val c1 = tmpl[baseT + x]
-                    val c2 = area[baseA + x]
-                    score += abs(((c1 shr 16) and 0xFF) - ((c2 shr 16) and 0xFF))
-                    score += abs(((c1 shr 8) and 0xFF) - ((c2 shr 8) and 0xFF))
-                    score += abs((c1 and 0xFF) - (c2 and 0xFF))
+        Toast.makeText(this, R.string.segmenting, Toast.LENGTH_SHORT).show()
+        Thread {
+            var ok = 0
+            var fail = 0
+            for (el in images) {
+                val r = Segmenter.segment(this, el.bitmap)
+                if (r != null) {
+                    val ratio = r.width.toFloat() / r.height
+                    el.bitmap = r
+                    el.segmented = true
+                    el.h = el.w / ratio
+                    ok++
+                } else {
+                    fail++
                 }
             }
-            if (score < bestScore) {
-                bestScore = score
-                bestPos = y
+            runOnUiThread {
+                canvas.invalidate()
+                val msg = getString(R.string.segment_all_done, ok, fail)
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
             }
-        }
-        st.recycle()
-        sb.recycle()
-        // 每通道平均差 < 30 才认定是真重叠（同屏截图通常 < 8）；否则退化为 0（普通纵向拼接）
-        val perChannel = bestScore.toDouble() / (SW * tmplLen * 3)
-        return if (perChannel < 30.0) {
-            (bestPos.toLong() * bottom.height / sh2).toInt().coerceIn(0, bottom.height / 2)
-        } else {
-            0
-        }
+        }.start()
     }
 
-    /** 智能长图拼接：统一宽度后逐对找重叠缝，无缝衔接 */
-    private fun mergeSmart(list: List<Bitmap>, bg: Int): Bitmap {
-        val wMax = list.maxOf { it.width }
-        val scaled = list.map { b ->
-            if (b.width == wMax) b
-            else Bitmap.createScaledBitmap(
-                b, wMax, (b.height * wMax.toLong() / b.width).toInt(), true
-            )
-        }
-        val created = mutableListOf<Bitmap>()
-        var cur = scaled[0]
-        for (i in 1 until scaled.size) {
-            val next = scaled[i]
-            val overlap = findOverlap(cur, next)
-            val h = cur.height + next.height - overlap
-            val out = Bitmap.createBitmap(wMax, h, Bitmap.Config.ARGB_8888)
-            created += out
-            val c = Canvas(out)
-            c.drawColor(bg)
-            c.drawBitmap(cur, 0f, 0f, null)
-            c.drawBitmap(next, 0f, (cur.height - overlap).toFloat(), null)
-            cur = out
-        }
-        scaled.forEach { if (it !== cur && !it.isRecycled) it.recycle() }
-        created.forEach { if (it !== cur && !it.isRecycled) it.recycle() }
-        // 总高度上限保护（防 OOM）
-        if (cur.height > MAX_LONG) {
-            val k = MAX_LONG.toFloat() / cur.height
-            val out = Bitmap.createScaledBitmap(
-                cur, (cur.width * k).toInt(), MAX_LONG, true
-            )
-            cur.recycle()
-            return out
-        }
-        return cur
+    // ---------- 合成 / 保存 / 分享 ----------
+    private fun mergeAndShare() {
+        val bmp = if (mode == "grid" && curUris.isNotEmpty()) mergeGrid() else canvas.renderToBitmap()
+        val uri = saveToGallery(bmp)
+        if (uri != null) shareBitmap(uri)
     }
 
-    // ---------- 保存到相册（MediaStore，Android 10+ 免权限） ----------
     private fun saveToGallery(bmp: Bitmap): Uri? {
-        val name = "collage_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.jpg"
-        val dir = Environment.DIRECTORY_PICTURES + "/Collage"
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, name)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            if (Build.VERSION.SDK_INT >= 29) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, dir)
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            } else {
-                put(
-                    MediaStore.Images.Media.DATA,
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-                        .absolutePath + "/Collage/$name"
-                )
+        val time = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val displayName = "collage_$time.png"
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val cr = contentResolver
+            val coll = android.provider.MediaStore.Images.Media.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val v = android.content.ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Collage")
             }
-        }
-        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            ?: return null
-        val ok = contentResolver.openOutputStream(uri)?.use { out ->
-            bmp.compress(Bitmap.CompressFormat.JPEG, 95, out)
-        } ?: false
-        if (!ok) {
-            contentResolver.delete(uri, null, null)
-            return null
-        }
-        if (Build.VERSION.SDK_INT >= 29) {
-            values.clear()
-            values.put(MediaStore.Images.Media.IS_PENDING, 0)
-            contentResolver.update(uri, values, null, null)
-        }
-        return uri
-    }
-
-    // ---------- 拼接待定：先预览，用户决定保存/分享 ----------
-    // 只有用户点「保存到相册」才写 MediaStore，避免随手合成污染相册。
-    private fun showPreviewDialog(bmp: Bitmap) {
-        val iv = ImageView(this).apply {
-            setImageBitmap(bmp)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-        }
-        val container = FrameLayout(this).apply {
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-            addView(
-                iv,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    (resources.displayMetrics.heightPixels * 0.55).toInt()
-                )
-            )
-        }
-        var consumed = false
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.preview_title))
-            .setView(container)
-            .setPositiveButton(getString(R.string.save_to_gallery)) { _, _ ->
-                consumed = true
-                val uri = try {
-                    saveToGallery(bmp)
-                } catch (e: Exception) {
-                    Log.e(TAG, "保存异常", e)
-                    null
-                }
-                toast(if (uri != null) getString(R.string.saved_ok) else getString(R.string.saved_fail))
-                bmp.recycle()
-            }
-            .setNeutralButton(getString(R.string.share)) { _, _ ->
-                consumed = true
-                shareBitmap(bmp)
-                bmp.recycle()
-            }
-            .setNegativeButton(getString(R.string.cancel), null)
-            .setOnDismissListener { if (!consumed) bmp.recycle() }
-            .show()
-    }
-
-    private fun shareBitmap(bmp: Bitmap) {
-        try {
-            val dir = File(cacheDir, "share").apply { mkdirs() }
-            val f = File(dir, "collage_share.jpg")
-            f.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
-            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", f)
-            val intent = Intent(Intent.ACTION_SEND).apply {
-                type = "image/jpeg"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            startActivity(Intent.createChooser(intent, getString(R.string.share)))
-        } catch (e: Exception) {
-            toast(getString(R.string.saved_fail))
+            val uri = cr.insert(coll, v) ?: return null
+            cr.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            uri
+        } else {
+            val dir = File(getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES), "Collage")
+            dir.mkdirs()
+            val f = File(dir, displayName)
+            FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            Uri.fromFile(f)
         }
     }
 
-    private fun toast(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-    }
-
-    /** 删除第 index 张后，修正已抠图角标集合中的位置索引 */
-    private fun syncSegmentedSetOnRemove(index: Int) {
-        val it = segmentedSet.iterator()
-        val next = mutableSetOf<Int>()
-        while (it.hasNext()) {
-            val pos = it.next()
-            if (pos < index) next.add(pos)
-            else if (pos > index) next.add(pos - 1)
+    private fun shareBitmap(uri: Uri) {
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "image/png"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        segmentedSet.clear()
-        segmentedSet.addAll(next)
+        startActivity(Intent.createChooser(intent, "分享拼图"))
     }
 }
