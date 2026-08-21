@@ -616,7 +616,9 @@ class FreeCanvasView @JvmOverloads constructor(
             c.saveLayerAlpha(-el.w / 2f, -el.h / 2f, el.w / 2f, el.h / 2f, (el.alpha * 255).toInt(), Canvas.ALL_SAVE_FLAG)
             when (el) {
                 is CanvasElement.ImageElement -> {
-                    val dw = BitmapDrawable(resources, applyEffects(el))
+                    var rbmp = applyEffects(el)
+                    if (el.userMask != null) rbmp = composeUserMask(el, rbmp)
+                    val dw = BitmapDrawable(resources, rbmp)
                     dw.setBounds(-(el.w / 2f).toInt(), -(el.h / 2f).toInt(), (el.w / 2f).toInt(), (el.h / 2f).toInt())
                     dw.draw(c)
                 }
