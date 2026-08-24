@@ -837,34 +837,10 @@ class MainActivity : AppCompatActivity() {
     private fun openSegment() {
         if (segmenting) return
         val el = canvas.selected as? ImageElement ?: return
-        segmenting = true
-        val handle = showSegmentDialog(1)
-        Thread {
-            val result = try {
-                Segmenter.segment(this, el.bitmap)
-            } catch (e: Exception) { null }
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                finishSegment(handle) {
-                    if (result == null) {
-                        val msg = Segmenter.lastError?.lineSequence()?.firstOrNull()?.take(120)
-                            ?: getString(R.string.segment_fail)
-                        Toast.makeText(this, getString(R.string.segment_fail) + ": " + msg, Toast.LENGTH_LONG).show()
-                    } else {
-                        // 替换元素 bitmap 并保持尺寸比例
-                        val ratio = result.width.toFloat() / result.height
-                        el.bitmap = result
-                        el.segmented = true
-                        el.h = el.w / ratio
-                        canvas.invalidate()
-                        Toast.makeText(this, R.string.segment_ok, Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        }.start()
+        runSegment(listOf(el))
     }
 
-    /** 一键抠图：链式逐张推理，每张完成立即上屏，进度对话框实时推进 */
+    /** 一键抠图：链式逐张推理，每张完成立即上屏 */
     private fun segmentAllImages() {
         if (segmenting) return
         val images = canvas.elements.filterIsInstance<ImageElement>()
@@ -872,19 +848,26 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.err_no_images, Toast.LENGTH_SHORT).show()
             return
         }
+        runSegment(images)
+    }
+
+    /** 链式逐张推理 [targets]（单张与批量共用），进度对话框实时推进 */
+    private fun runSegment(targets: List<ImageElement>) {
+        if (targets.isEmpty()) return
         segmenting = true
-        val handle = showSegmentDialog(images.size)
+        val single = targets.size == 1
+        val handle = showSegmentDialog(targets.size)
         var ok = 0
         var fail = 0
         fun step(i: Int) {
-            if (i >= images.size) {
+            if (i >= targets.size) {
                 segmenting = false
                 handle.dialog.dismiss()
-                canvas.invalidate()
+                if (!single) canvas.invalidate()
                 Toast.makeText(this, getString(R.string.segment_all_done, ok, fail), Toast.LENGTH_LONG).show()
                 return
             }
-            val el = images[i]
+            val el = targets[i]
             Thread {
                 val result = try {
                     Segmenter.segment(this, el.bitmap)
@@ -899,22 +882,21 @@ class MainActivity : AppCompatActivity() {
                         el.h = el.w / ratio
                         ok++
                         canvas.invalidate()   // 抠好一张立即显示一张
+                        if (single) Toast.makeText(this, R.string.segment_ok, Toast.LENGTH_SHORT).show()
                     } else {
                         fail++
+                        if (single) {
+                            val msg = Segmenter.lastError?.lineSequence()?.firstOrNull()?.take(120)
+                                ?: getString(R.string.segment_fail)
+                            Toast.makeText(this, getString(R.string.segment_fail) + ": " + msg, Toast.LENGTH_LONG).show()
+                        }
                     }
-                    updateSegmentProgress(handle, i + 1, images.size)
+                    updateSegmentProgress(handle, i + 1, targets.size)
                     step(i + 1)
                 }
             }.start()
         }
         step(0)
-    }
-
-    /** 统一收尾：复位进行中标志、关闭等待框，再执行 [body]（须在 UI 线程调用） */
-    private fun finishSegment(handle: SegmentProgress, body: () -> Unit) {
-        segmenting = false
-        handle.dialog.dismiss()
-        body()
     }
 
     /** 抠图等待对话框句柄：批量时 bar 非空 */

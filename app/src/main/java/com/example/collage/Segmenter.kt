@@ -22,14 +22,6 @@ object Segmenter {
 
     private const val MODEL_NAME = "selfie_segmenter.tflite"
 
-    /**
-     * 是否优先使用 MODNet 模型抠图。
-     * true 且 assets/modnet.tflite 存在时走 MODNet（标准 TFLite 推理）；
-     * 否则回退到 MediaPipe selfie_segmenter。
-     */
-    var useModnet: Boolean = true
-        private set
-
     var lastError: String? = null
         private set
 
@@ -55,21 +47,18 @@ object Segmenter {
 
     /**
      * 对 [src] 抠图，返回带透明通道的新 bitmap；失败返回 null（原因见 [lastError]）。
+     * 优先使用 MODNet 大模型（多线程提速后已足够快）；资产缺失时回退轻量模型。
      */
     fun segment(context: Context, src: Bitmap): Bitmap? {
         lastError = null
-        // 优先使用 MODNet（若已启用且模型存在）
-        if (useModnet) {
-            val modnetModelExists = try {
-                context.assets.openFd(ModnetSegmenter.MODEL_NAME).use { true }
-            } catch (e: Exception) { false }
-            if (modnetModelExists) {
-                return ModnetSegmenter.segment(context, src)
-            }
-            // 模型不存在：记录原因并回退 MediaPipe
-            lastError = "modnet.tflite not found, fallback to MediaPipe"
-            Log.w("Segmenter", lastError ?: "")
+        val modnetModelExists = try {
+            context.assets.openFd(ModnetSegmenter.MODEL_NAME).use { true }
+        } catch (e: Exception) { false }
+        if (modnetModelExists) {
+            return ModnetSegmenter.segment(context, src)
         }
+        lastError = "modnet.tflite not found, fallback to fast model"
+        Log.w("Segmenter", lastError ?: "")
         val seg = getSegmenter(context) ?: return null
         return try {
             val mpImage = BitmapImageBuilder(src).build()
@@ -99,14 +88,16 @@ object Segmenter {
         val sw = src.width
         val sh = src.height
         val result = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
+        // 一次批量读取替代逐像素 getPixel（后者每次都有 JNI 开销，大图上耗时数秒）
         val outPixels = IntArray(sw * sh)
+        src.getPixels(outPixels, 0, sw, 0, 0, sw, sh)
         var oi = 0
         for (y in 0 until sh) {
             val my = (y * mh / sh).coerceIn(0, mh - 1)
             for (x in 0 until sw) {
                 val mx = (x * mw / sw).coerceIn(0, mw - 1)
                 val a = (floats[my * mw + mx] * 255).toInt().coerceIn(0, 255)
-                val sp = src.getPixel(x, y)
+                val sp = outPixels[oi]
                 outPixels[oi++] = (a shl 24) or (sp and 0x00FFFFFF)
             }
         }

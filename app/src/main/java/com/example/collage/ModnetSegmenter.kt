@@ -62,9 +62,14 @@ object ModnetSegmenter {
             if (len <= 0) len = afd.length
             val bb = fc.map(FileChannel.MapMode.READ_ONLY, afd.startOffset, len)
 
-            // 使用 CPU 推理。MODNet 的 relu6/upsample 等算子在 GPU delegate
-            // 上可能触发 native 崩溃导致闪退，故暂不启用 GPU 加速。
-            interpreter = Interpreter(bb)
+            // CPU 推理提速：MODNet 的 relu6/upsample 等算子在 GPU delegate
+            // 上可能触发 native 崩溃导致闪退，故不启用 GPU 加速；
+            // 改用 CPU 多线程（卷积密集型网络接近线性加速）。
+            val opts = Interpreter.Options().apply {
+                val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+                setNumThreads(minOf(4, cores))
+            }
+            interpreter = Interpreter(bb, opts)
             Log.d("Modnet", "model loaded")
             interpreter
         } catch (e: Exception) {
@@ -165,21 +170,34 @@ object ModnetSegmenter {
         }
 
         // 形态学膨胀：取半径邻域内的最大值，补回被吃掉的边缘 1~2 像素。
+        // 方形核最大值滤波可分离：先水平再垂直各一次一维 pass，
+        // 计算量从 O(n·(2r+1)²) 降到 O(n·2(2r+1))，结果逐位等价。
         val r = DILATE_RADIUS
+        // 水平 pass
+        val tmp = FloatArray(n)
+        for (y in 0 until ah) {
+            val row = y * aw
+            for (x in 0 until aw) {
+                val x0 = (x - r).coerceAtLeast(0)
+                val x1 = (x + r).coerceAtMost(aw - 1)
+                var m = remapped[row + x]
+                for (xx in x0..x1) {
+                    val v = remapped[row + xx]
+                    if (v > m) m = v
+                }
+                tmp[row + x] = m
+            }
+        }
+        // 垂直 pass
         val dilated = FloatArray(n)
         for (y in 0 until ah) {
             val y0 = (y - r).coerceAtLeast(0)
             val y1 = (y + r).coerceAtMost(ah - 1)
             for (x in 0 until aw) {
-                val x0 = (x - r).coerceAtLeast(0)
-                val x1 = (x + r).coerceAtMost(aw - 1)
-                var m = remapped[y * aw + x]
+                var m = tmp[y * aw + x]
                 for (yy in y0..y1) {
-                    val row = yy * aw
-                    for (xx in x0..x1) {
-                        val v = remapped[row + xx]
-                        if (v > m) m = v
-                    }
+                    val v = tmp[yy * aw + x]
+                    if (v > m) m = v
                 }
                 dilated[y * aw + x] = m
             }
@@ -192,14 +210,16 @@ object ModnetSegmenter {
         val sw = src.width
         val sh = src.height
         val result = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
+        // 一次批量读取替代逐像素 getPixel（后者每次都有 JNI 开销，大图上耗时数秒）
         val outPixels = IntArray(sw * sh)
+        src.getPixels(outPixels, 0, sw, 0, 0, sw, sh)
         var oi = 0
         for (y in 0 until sh) {
             val ay = (y * ah / sh).coerceIn(0, ah - 1)
             for (x in 0 until sw) {
                 val ax = (x * aw / sw).coerceIn(0, aw - 1)
                 val a = (processed[ay * aw + ax] * 255).toInt().coerceIn(0, 255)
-                val sp = src.getPixel(x, y)
+                val sp = outPixels[oi]
                 outPixels[oi++] = (a shl 24) or (sp and 0x00FFFFFF)
             }
         }
