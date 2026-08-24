@@ -17,6 +17,7 @@ import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.Gravity
 import android.widget.*
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -52,6 +53,9 @@ class MainActivity : AppCompatActivity() {
 
     /** 画板设置 BottomSheet（懒加载复用） */
     private var boardSheet: BottomSheetDialog? = null
+
+    /** 是否有抠图任务进行中（防重复点击） */
+    private var segmenting = false
 
     private var mode = "free"   // grid | free | poster | puzzle
 
@@ -824,60 +828,143 @@ class MainActivity : AppCompatActivity() {
 
     /** 抠人像：对当前选中图片做分割，得到透明背景结果 */
     private fun openSegment() {
+        if (segmenting) return
         val el = canvas.selected as? ImageElement ?: return
-        Toast.makeText(this, R.string.segmenting, Toast.LENGTH_SHORT).show()
+        segmenting = true
+        val handle = showSegmentDialog(1)
         Thread {
-            val src = el.bitmap
-            val result = Segmenter.segment(this, src)
+            val result = try {
+                Segmenter.segment(this, el.bitmap)
+            } catch (e: Exception) { null }
             runOnUiThread {
-                if (result == null) {
-                    val msg = Segmenter.lastError?.lineSequence()?.firstOrNull()?.take(120)
-                        ?: getString(R.string.segment_fail)
-                    Toast.makeText(this, getString(R.string.segment_fail) + ": " + msg, Toast.LENGTH_LONG).show()
-                    return@runOnUiThread
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                finishSegment(handle) {
+                    if (result == null) {
+                        val msg = Segmenter.lastError?.lineSequence()?.firstOrNull()?.take(120)
+                            ?: getString(R.string.segment_fail)
+                        Toast.makeText(this, getString(R.string.segment_fail) + ": " + msg, Toast.LENGTH_LONG).show()
+                    } else {
+                        // 替换元素 bitmap 并保持尺寸比例
+                        val ratio = result.width.toFloat() / result.height
+                        el.bitmap = result
+                        el.segmented = true
+                        el.h = el.w / ratio
+                        canvas.invalidate()
+                        Toast.makeText(this, R.string.segment_ok, Toast.LENGTH_SHORT).show()
+                    }
                 }
-                // 替换元素 bitmap 并保持尺寸比例
-                val ratio = result.width.toFloat() / result.height
-                el.bitmap = result
-                el.segmented = true
-                el.w = el.w   // 保持当前宽，高度按新比例重算
-                el.h = el.w / ratio
-                canvas.invalidate()
-                Toast.makeText(this, R.string.segment_ok, Toast.LENGTH_SHORT).show()
             }
         }.start()
     }
 
-    /** 一键抠图：对画布上所有图片元素逐张抠人像 */
+    /** 一键抠图：链式逐张推理，每张完成立即上屏，进度对话框实时推进 */
     private fun segmentAllImages() {
+        if (segmenting) return
         val images = canvas.elements.filterIsInstance<ImageElement>()
         if (images.isEmpty()) {
             Toast.makeText(this, R.string.err_no_images, Toast.LENGTH_SHORT).show()
             return
         }
-        Toast.makeText(this, R.string.segmenting, Toast.LENGTH_SHORT).show()
-        Thread {
-            var ok = 0
-            var fail = 0
-            for (el in images) {
-                val r = Segmenter.segment(this, el.bitmap)
-                if (r != null) {
-                    val ratio = r.width.toFloat() / r.height
-                    el.bitmap = r
-                    el.segmented = true
-                    el.h = el.w / ratio
-                    ok++
-                } else {
-                    fail++
-                }
-            }
-            runOnUiThread {
+        segmenting = true
+        val handle = showSegmentDialog(images.size)
+        var ok = 0
+        var fail = 0
+        fun step(i: Int) {
+            if (i >= images.size) {
+                segmenting = false
+                handle.dialog.dismiss()
                 canvas.invalidate()
-                val msg = getString(R.string.segment_all_done, ok, fail)
-                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                Toast.makeText(this, getString(R.string.segment_all_done, ok, fail), Toast.LENGTH_LONG).show()
+                return
             }
-        }.start()
+            val el = images[i]
+            Thread {
+                val result = try {
+                    Segmenter.segment(this, el.bitmap)
+                } catch (e: Exception) { null }
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    // 元素数据只在主线程写，避免与渲染并发
+                    if (result != null) {
+                        val ratio = result.width.toFloat() / result.height
+                        el.bitmap = result
+                        el.segmented = true
+                        el.h = el.w / ratio
+                        ok++
+                        canvas.invalidate()   // 抠好一张立即显示一张
+                    } else {
+                        fail++
+                    }
+                    updateSegmentProgress(handle, i + 1, images.size)
+                    step(i + 1)
+                }
+            }.start()
+        }
+        step(0)
     }
+
+    /** 统一收尾：复位进行中标志、关闭等待框，再执行 [body]（须在 UI 线程调用） */
+    private fun finishSegment(handle: SegmentProgress, body: () -> Unit) {
+        segmenting = false
+        handle.dialog.dismiss()
+        body()
+    }
+
+    /** 抠图等待对话框句柄：批量时 bar 非空 */
+    private class SegmentProgress(
+        val dialog: AlertDialog,
+        val bar: ProgressBar?,
+        val text: TextView
+    )
+
+    /**
+     * 显示抠图等待对话框（模态、不可取消——推理线程无法中断）。
+     * total==1 用不确定进度圆圈；total>1 用水平进度条并显示 i/n 文案。
+     */
+    private fun showSegmentDialog(total: Int): SegmentProgress {
+        val dip = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1f, resources.displayMetrics)
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding((24 * dip).toInt(), (20 * dip).toInt(), (24 * dip).toInt(), (4 * dip).toInt())
+        }
+        val bar: ProgressBar?
+        val text = TextView(this).apply {
+            textSize = 14f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurface))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = (16 * dip).toInt() }
+        }
+        if (total > 1) {
+            bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                max = total
+                progress = 0
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            text.text = getString(R.string.segment_progress, 0, total)
+            row.addView(bar)
+        } else {
+            bar = null
+            text.setText(R.string.segmenting)
+            row.addView(ProgressBar(this))
+        }
+        row.addView(text)
+        val dlg = AlertDialog.Builder(this)
+            .setView(row)
+            .setCancelable(false)
+            .create()
+        dlg.show()
+        return SegmentProgress(dlg, bar, text)
+    }
+
+    /** 更新批量抠图进度显示（i/n）。 */
+    private fun updateSegmentProgress(handle: SegmentProgress, done: Int, total: Int) {
+        handle.bar?.progress = done
+        handle.text.text = getString(R.string.segment_progress, done, total)
+    }
+
 
     // ---------- 合成 / 保存 / 分享 ----------
     private fun mergeAndShare() {

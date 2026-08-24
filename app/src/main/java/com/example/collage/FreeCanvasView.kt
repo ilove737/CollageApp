@@ -18,6 +18,18 @@ class FreeCanvasView @JvmOverloads constructor(
 
     companion object {
         const val HANDLE = 22f   // 控制点视觉半径(逻辑坐标)
+
+        // ---- 自动排布参数 ----
+        /** 单个元素占槽位边长的比例 */
+        private const val SLOT_FILL = 0.72f
+        /** 全量打散时的抖动幅度（占槽内余量比例） */
+        private const val JITTER_RATIO = 0.35f
+        /** 随机旋转角上限（度） */
+        private const val RANDOM_ROTATION = 10f
+        /** 内容距画布边缘的安全边距（逻辑像素） */
+        private const val CANVAS_MARGIN = 8f
+        /** 允许的最大重叠面积比例（相对双方面积较小者），超过即视为无效位置 */
+        private const val MAX_OVERLAP_RATIO = 0.12f
     }
 
     /** 画板逻辑尺寸（可配置），默认 1080 正方形 */
@@ -286,12 +298,23 @@ class FreeCanvasView @JvmOverloads constructor(
         // 关键：默认 source-over 混色下，画"透明"是空操作(擦不掉)，
         // 因此 ERASE 必须用 PorterDuff CLEAR 模式才能真正把像素清零。
         val erase = brushMode == MaskBrush.ERASE
-        // 屏幕坐标 -> 蒙版像素坐标
+        // 屏幕坐标 -> 元素本地坐标（含旋转逆变换）-> 蒙版像素坐标
         val (tlx, tly) = toScreen(el.x, el.y)
         val w = el.w * scale * canvasScale
         val h = el.h * scale * canvasScale
-        val fx = ((mx - tlx) / w)
-        val fy = ((my - tly) / h)
+        // 手指相对元素中心（屏幕系）的位移
+        val cx = tlx + w / 2f
+        val cy = tly + h / 2f
+        val dx = mx - cx
+        val dy = my - cy
+        // 按 -rotation 逆旋转回元素本地坐标系，抵消图片自身的旋转
+        val rad = Math.toRadians(el.rotation.toDouble())
+        val cosA = cos(rad).toFloat()
+        val sinA = sin(rad).toFloat()
+        val localX = dx * cosA + dy * sinA
+        val localY = -dx * sinA + dy * cosA
+        val fx = (localX / w) + 0.5f
+        val fy = (localY / h) + 0.5f
         if (fx < -0.1f || fx > 1.1f || fy < -0.1f || fy > 1.1f) return
         val px = (fx * mask.width).toInt().coerceIn(0, mask.width - 1)
         val py = (fy * mask.height).toInt().coerceIn(0, mask.height - 1)
@@ -378,10 +401,14 @@ class FreeCanvasView @JvmOverloads constructor(
         val (tlx, tly) = toScreen(el.x, el.y)
         val w = el.w * scale * canvasScale
         val h = el.h * scale * canvasScale
-        // 在元素区域上叠一层半透明遮罩，提示"可编辑"
+        // 在元素区域上叠一层半透明遮罩，提示"可编辑"（随元素旋转，贴合图片轮廓）
         val overlay = Paint().apply { color = 0x22000000.toInt(); style = Paint.Style.FILL }
-        canvas.drawRect(tlx, tly, tlx + w, tly + h, overlay)
-        // 笔刷光标
+        canvas.save()
+        canvas.translate(tlx + w / 2f, tly + h / 2f)
+        canvas.rotate(el.rotation)
+        canvas.drawRect(-w / 2f, -h / 2f, w / 2f, h / 2f, overlay)
+        canvas.restore()
+        // 笔刷光标（跟随手指，不随元素旋转）
         val cur = Paint().apply {
             color = if (brushMode == MaskBrush.ERASE) 0xFFE53935.toInt() else 0xFF43A047.toInt()
             style = Paint.Style.STROKE
@@ -508,8 +535,22 @@ class FreeCanvasView @JvmOverloads constructor(
         )
         el.zOrder = (elements.maxOfOrNull { it.zOrder } ?: 0) + 1
         elements.add(el)
+        autoArrangeNew(el)
         select(el)
         invalidate()
+    }
+
+    /**
+     * 新元素自动排布：画布此前为空时整体随机铺排；
+     * 否则只为新元素寻找与已有元素重叠最小的空槽位（不打乱用户已摆好的布局）。
+     */
+    private fun autoArrangeNew(el: CanvasElement) {
+        val existing = elements.filter { it !== el }
+        if (existing.isEmpty()) {
+            randomizeLayout()
+        } else {
+            placeInFreeSlot(el, existing)
+        }
     }
 
     fun rebindImage(uri: Uri, bmp: Bitmap) {
@@ -548,17 +589,113 @@ class FreeCanvasView @JvmOverloads constructor(
         selected?.let { it.zOrder -= 1; invalidate() }
     }
 
-    /** 阶段3：随机打散自由布局 */
-    fun randomizeLayout() {
-        for (el in elements) {
-            if (el.locked) continue
-            el.x = (Math.random() * logicalW * 0.5f).toFloat()
-            el.y = (Math.random() * logicalH * 0.5f).toFloat()
-            el.rotation = (Math.random() * 40 - 20).toFloat()
-            val s = 0.3f + Math.random().toFloat() * 0.4f
-            el.w = logicalW * s
-            el.h = el.w / el.aspect()
+    // ---------- 自动排布 / 随机布局 ----------
+    // 模型：网格槽位 + 随机抖动 + 小角度旋转（拼贴照片墙风格）。
+    // 槽位互斥保证结构性不重叠，抖动受余量约束且经重叠校验，杜绝大面积覆盖。
+
+    /** 把 n 个槽位按网格铺满画布，末行不满时水平居中。 */
+    private fun gridSlots(n: Int): List<RectF> {
+        if (n <= 0) return emptyList()
+        val cols = ceil(sqrt(n.toFloat())).toInt().coerceAtLeast(1)
+        val rows = ceil(n.toFloat() / cols).toInt()
+        val cellW = logicalW / cols
+        val cellH = logicalH / rows
+        val slots = ArrayList<RectF>(n)
+        for (row in 0 until rows) {
+            val countInRow = if (row == rows - 1) n - (rows - 1) * cols else cols
+            val rowOffsetX = (logicalW - countInRow * cellW) / 2f
+            for (col in 0 until countInRow) {
+                slots.add(RectF(
+                    rowOffsetX + col * cellW, row * cellH,
+                    rowOffsetX + (col + 1) * cellW, (row + 1) * cellH
+                ))
+            }
         }
+        return slots
+    }
+
+    /** 元素等比缩放到槽位内（fill 比例）后的尺寸。 */
+    private fun fittedSize(el: CanvasElement, slot: RectF, fill: Float): Pair<Float, Float> {
+        var w = slot.width() * fill
+        var h = w / el.aspect()
+        val maxH = slot.height() * fill
+        if (h > maxH) { h = maxH; w = h * el.aspect() }
+        return Pair(w.coerceAtLeast(40f), h.coerceAtLeast(40f))
+    }
+
+    private fun centeredRect(cx: Float, cy: Float, w: Float, h: Float) =
+        RectF(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f)
+
+    /** 两个包围盒的相交面积（AABB 近似）。 */
+    private fun overlapArea(a: RectF, b: RectF): Float {
+        val l = max(a.left, b.left); val t = max(a.top, b.top)
+        val r = min(a.right, b.right); val btm = min(a.bottom, b.bottom)
+        return if (r > l && btm > t) (r - l) * (btm - t) else 0f
+    }
+
+    /** 边缘安全范围内的坐标钳制；元素超宽时退化为居中。 */
+    private fun clampMargin(v: Float, span: Float, total: Float): Float {
+        val hi = total - CANVAS_MARGIN - span
+        return if (hi >= CANVAS_MARGIN) v.coerceIn(CANVAS_MARGIN, hi) else (total - span) / 2f
+    }
+
+    /**
+     * 将元素放入槽位：等比适配并居中落位。
+     */
+    private fun fitIntoSlot(el: CanvasElement, slot: RectF) {
+        val size = fittedSize(el, slot, SLOT_FILL)
+        el.w = size.first; el.h = size.second
+        el.x = slot.centerX() - el.w / 2f
+        el.y = slot.centerY() - el.h / 2f
+    }
+
+    /**
+     * 在槽内做有限随机偏移与旋转；
+     * 偏移后若与画布上其他元素（按其最终位置）重叠超过阈值则保持居中位置。
+     */
+    private fun applyJitter(el: CanvasElement, slot: RectF, jitterRatio: Float) {
+        if (el.locked) return
+        val baseX = el.x; val baseY = el.y
+        val freeW = (slot.width() - el.w).coerceAtLeast(0f) * jitterRatio
+        val freeH = (slot.height() - el.h).coerceAtLeast(0f) * jitterRatio
+        val candX = clampMargin(baseX + ((Math.random() - 0.5) * 2 * freeW).toFloat(), el.w, logicalW)
+        val candY = clampMargin(baseY + ((Math.random() - 0.5) * 2 * freeH).toFloat(), el.h, logicalH)
+        val test = centeredRect(candX + el.w / 2f, candY + el.h / 2f, el.w, el.h)
+        val tooMuchOverlap = elements.any {
+            it !== el && overlapArea(test, it.bounds()) > min(el.w * el.h, it.w * it.h) * MAX_OVERLAP_RATIO
+        }
+        if (!tooMuchOverlap) { el.x = candX; el.y = candY }
+        el.rotation = ((Math.random() * 2 - 1) * RANDOM_ROTATION).toFloat()
+    }
+
+    /**
+     * 为追加的新元素挑选空槽位：以当前元素总数建立网格，
+     * 对每个候选槽评估与已有元素的重叠面积，从最优的前几个里随机取一（避免每次都落同一格）。
+     */
+    private fun placeInFreeSlot(el: CanvasElement, existing: List<CanvasElement>) {
+        val slots = gridSlots(elements.size.coerceAtLeast(1))
+        val scored: List<Pair<Float, RectF>> = slots.map { slot ->
+            val s = fittedSize(el, slot, SLOT_FILL)
+            val r = centeredRect(slot.centerX(), slot.centerY(), s.first, s.second)
+            Pair(existing.sumOf { overlapArea(r, it.bounds()).toDouble() }.toFloat(), slot)
+        }
+        val top = scored.sortedBy { it.first }.take(3)
+        val slot = top[(Math.random() * top.size).toInt()].second
+        fitIntoSlot(el, slot)
+        applyJitter(el, slot, JITTER_RATIO * 0.6f)
+    }
+
+    /**
+     * 随机打散自由布局：两阶段执行——
+     * 1) 可移动元素洗牌后依次落入互斥网格槽位（此时整体零结构性重叠，锁定元素保持原位）；
+     * 2) 基于最终布局逐个尝试有限抖动与 ±10° 旋转，重叠超阈值即回退居中。
+     */
+    fun randomizeLayout() {
+        val movable = elements.filter { !it.locked }.shuffled()
+        if (movable.isEmpty()) { invalidate(); return }
+        val slots = gridSlots(movable.size)
+        movable.forEachIndexed { idx, el -> fitIntoSlot(el, slots[idx]) }
+        movable.forEachIndexed { idx, el -> applyJitter(el, slots[idx], JITTER_RATIO) }
         invalidate()
     }
 

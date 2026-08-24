@@ -24,6 +24,7 @@
     <string name="segment_all">一键抠图</string>
     <string name="segment_all_done">抠图完成：成功 %1$d 张，失败 %2$d 张</string>
     <string name="segmenting">抠图中…</string>
+    <string name="segment_progress">正在抠图 %1$d/%2$d</string>
     <string name="segment_ok">已抠出人像（透明背景）</string>
     <string name="segment_fail">抠图失败</string>
     <string name="del">删除</string>
