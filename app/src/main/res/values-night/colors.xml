@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material 3 语义色板 · 深色 -->
+<resources>
+    <color name="primary">#BBC3FF</color>
+    <color name="onPrimary">#233078</color>
+    <color name="primaryContainer">#3A4790</color>
+    <color name="onPrimaryContainer">#DEE1FF</color>
+
+    <color name="secondary">#C1C4DD</color>
+    <color name="onSecondary">#2B3042</color>
+    <color name="secondaryContainer">#414659</color>
+    <color name="onSecondaryContainer">#DDE1F9</color>
+
+    <color name="tertiary">#80D4D7</color>
+    <color name="onTertiary">#003738</color>
+    <color name="tertiaryContainer">#004F51</color>
+    <color name="onTertiaryContainer">#9CF1F3</color>
+
+    <color name="error">#FFB4AB</color>
+    <color name="onError">#690005</color>
+    <color name="errorContainer">#93000A</color>
+    <color name="onErrorContainer">#FFDAD6</color>
+
+    <color name="background">#121318</color>
+    <color name="onBackground">#E3E1EC</color>
+    <color name="surface">#121318</color>
+    <color name="onSurface">#E3E1EC</color>
+    <color name="surfaceVariant">#45464F</color>
+    <color name="onSurfaceVariant">#C6C5D0</color>
+
+    <color name="outline">#90909A</color>
+    <color name="outlineVariant">#45464F</color>
+
+    <color name="surfaceContainerLowest">#0C0E13</color>
+    <color name="surfaceContainerLow">#1A1B20</color>
+    <color name="surfaceContainer">#1E1F25</color>
+    <color name="surfaceContainerHigh">#282A30</color>
+    <color name="surfaceContainerHighest">#33343B</color>
+
+    <!-- 画布区工作台底色 -->
+    <color name="canvas_bg">#08090C</color>
+</resources>

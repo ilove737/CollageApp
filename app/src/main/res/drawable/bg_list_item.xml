@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 模式导航 · 未选中：透明胶囊 + 涟漪 -->
+<!-- 左栏列表项：圆角高容器色 + 涟漪 -->
 <ripple xmlns:android="http://schemas.android.com/apk/res/android"
     android:color="?attr/colorControlHighlight">
     <item>
         <shape android:shape="rectangle">
             <solid android:color="@android:color/transparent"/>
-            <corners android:radius="16dp"/>
+            <corners android:radius="10dp"/>
         </shape>
     </item>
 </ripple>

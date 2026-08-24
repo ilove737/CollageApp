@@ -96,4 +96,8 @@
     <string name="clear_mask">清空</string>
     <string name="done">完成</string>
     <string name="brush_size">笔刷大小</string>
+    <string name="tab_actions">操作</string>
+    <string name="tab_arrange">排列</string>
+    <string name="tab_props">属性</string>
+    <string name="board">画板</string>
 </resources>

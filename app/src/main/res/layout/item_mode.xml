@@ -10,15 +10,15 @@
 
     <ImageView
         android:id="@+id/modeIcon"
-        android:layout_width="26dp"
-        android:layout_height="26dp"
-        android:tint="#3F51B5" />
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:tint="?attr/colorOnSurfaceVariant" />
 
     <TextView
         android:id="@+id/modeLabel"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="3dp"
+        android:layout_marginTop="4dp"
         android:textSize="11sp"
-        android:textColor="#424242" />
+        android:textColor="?attr/colorOnSurfaceVariant" />
 </LinearLayout>

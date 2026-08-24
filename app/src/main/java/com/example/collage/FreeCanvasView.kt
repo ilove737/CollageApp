@@ -35,7 +35,7 @@ class FreeCanvasView @JvmOverloads constructor(
     val elements = mutableListOf<CanvasElement>()
     var selected: CanvasElement? = null
 
-    /** 画布整体缩放（由底部 SeekBar / 手势控制），1f = 100% */
+    /** 画布整体缩放（由底部缩放滑条 / 手势控制），1f = 100% */
     var canvasScale = 1f
 
     /** 选中的元素变化时回调（用于右侧面板刷新） */

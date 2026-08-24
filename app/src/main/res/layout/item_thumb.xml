@@ -2,7 +2,8 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="96dp"
     android:layout_height="96dp"
-    android:background="#22000000">
+    android:layout_margin="4dp"
+    android:background="@drawable/bg_thumb_card">
 
     <ImageView
         android:id="@+id/thumb"
@@ -16,25 +17,33 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|start"
-        android:layout_margin="2dp"
-        android:background="#CC000000"
-        android:paddingStart="4dp"
-        android:paddingEnd="4dp"
+        android:layout_margin="4dp"
+        android:background="@drawable/bg_badge_seg"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:paddingTop="1dp"
+        android:paddingBottom="1dp"
         android:text="@string/seg_badge"
-        android:textColor="#FFFFFF"
+        android:textColor="?attr/colorOnTertiaryContainer"
         android:textSize="10sp"
         android:visibility="gone" />
 
     <!-- 删除按钮：热区放大到 28dp，加白色描边保证在亮图上可见 -->
-    <TextView
-        android:id="@+id/btnRemove"
+    <FrameLayout
+        android:id="@+id/btnRemoveWrap"
         android:layout_width="28dp"
         android:layout_height="28dp"
         android:layout_gravity="top|end"
-        android:layout_margin="2dp"
-        android:background="@drawable/ic_remove_bg"
-        android:gravity="center"
-        android:text="✕"
-        android:textColor="#FFFFFF"
-        android:textSize="13sp" />
+        android:layout_margin="4dp"
+        android:background="@drawable/ic_remove_bg">
+
+        <ImageView
+            android:id="@+id/btnRemove"
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:layout_gravity="center"
+            android:src="@drawable/ic_close"
+            android:tint="#FFFFFF"
+            android:contentDescription="@string/del"/>
+    </FrameLayout>
 </FrameLayout>

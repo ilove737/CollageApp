@@ -1,0 +1,6 @@
+<resources>
+    <!-- 深色变体（注意：同名 style 为整体替换，故必须继承 Base） -->
+    <style name="Theme.CollageApp" parent="Base.Theme.CollageApp">
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

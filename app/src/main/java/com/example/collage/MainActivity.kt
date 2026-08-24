@@ -22,7 +22,15 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.example.collage.CanvasElement.ImageElement
+import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.button.MaterialButtonToggleGroup
+import com.google.android.material.chip.Chip
+import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.slider.Slider
+import com.google.android.material.tabs.TabLayout
 import kotlin.math.ceil
 import kotlin.math.sqrt
 import java.io.File
@@ -41,6 +49,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvNoSelection: TextView
     private lateinit var tvPanelTitle: TextView
     private lateinit var tvTitle: TextView
+
+    /** 画板设置 BottomSheet（懒加载复用） */
+    private var boardSheet: BottomSheetDialog? = null
 
     private var mode = "free"   // grid | free | poster | puzzle
 
@@ -88,28 +99,37 @@ class MainActivity : AppCompatActivity() {
 
         canvas.onSelectionChanged = { refreshPropertyPanel() }
 
-        bindBoardPanel()
-
         // 顶栏
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
         findViewById<View>(R.id.btnSave).setOnClickListener { mergeAndShare() }
 
-        // 底部
+        // 底部全局工具行
         findViewById<View>(R.id.btnAdd).setOnClickListener { addImage() }
         findViewById<View>(R.id.btnRandom).setOnClickListener { canvas.randomizeLayout() }
         findViewById<View>(R.id.btnSegmentAll).setOnClickListener { segmentAllImages() }
-        val seekZoom = findViewById<SeekBar>(R.id.seekZoom)
-        seekZoom.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) {
-                canvas.canvasScale = (p / 100f).coerceIn(0.3f, 3f)
-                canvas.invalidate()
-            }
-            override fun onStartTrackingTouch(s: SeekBar?) {}
-            override fun onStopTrackingTouch(s: SeekBar?) {}
-        })
+        findViewById<View>(R.id.btnBoard).setOnClickListener { showBoardSheet() }
+        val seekZoom = findViewById<Slider>(R.id.seekZoom)
+        seekZoom.addOnChangeListener { _, value, _ ->
+            canvas.canvasScale = (value / 100f).coerceIn(0.3f, 3f)
+            canvas.invalidate()
+        }
 
         // 右侧属性
         bindPropertyPanel()
+
+        // 属性面板 Tab 切换（操作 / 排列 / 属性）
+        val tabProps = findViewById<TabLayout>(R.id.tabProps)
+        val flipperProps = findViewById<ViewFlipper>(R.id.flipperProps)
+        tabProps.addTab(tabProps.newTab().setText(R.string.tab_actions))
+        tabProps.addTab(tabProps.newTab().setText(R.string.tab_arrange))
+        tabProps.addTab(tabProps.newTab().setText(R.string.tab_props))
+        tabProps.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
+            override fun onTabSelected(tab: TabLayout.Tab) {
+                flipperProps.displayedChild = tab.position
+            }
+            override fun onTabUnselected(tab: TabLayout.Tab?) {}
+            override fun onTabReselected(tab: TabLayout.Tab?) {}
+        })
 
         // 左侧模式导航（动态构建，避免 RecyclerView 依赖）
         buildModeList()
@@ -122,19 +142,33 @@ class MainActivity : AppCompatActivity() {
         modeList.removeAllViews()
         for (m in modes) {
             val v = LayoutInflater.from(this).inflate(R.layout.item_mode, modeList, false)
-            v.findViewById<ImageView>(R.id.modeIcon).setImageResource(m.icon)
-            v.findViewById<TextView>(R.id.modeLabel).setText(m.label)
-            v.setBackgroundResource(if (m.id == mode) R.drawable.bg_mode_tab_sel else R.drawable.bg_mode_tab)
+            val icon = v.findViewById<ImageView>(R.id.modeIcon)
+            val label = v.findViewById<TextView>(R.id.modeLabel)
+            icon.setImageResource(m.icon)
+            label.setText(m.label)
+            applyModeItemState(v, m.id == mode)
             v.setOnClickListener {
                 mode = m.id
                 for (i in 0 until modeList.childCount) {
                     modeList.getChildAt(i).setBackgroundResource(R.drawable.bg_mode_tab)
+                    val childIcon = modeList.getChildAt(i).findViewById<ImageView>(R.id.modeIcon)
+                    val childLabel = modeList.getChildAt(i).findViewById<TextView>(R.id.modeLabel)
+                    childIcon.setColorFilter(ContextCompat.getColor(this, R.color.onSurfaceVariant))
+                    childLabel.setTextColor(ContextCompat.getColor(this, R.color.onSurfaceVariant))
                 }
-                v.setBackgroundResource(R.drawable.bg_mode_tab_sel)
+                applyModeItemState(v, true)
                 selectMode(m.id)
             }
             modeList.addView(v)
         }
+    }
+
+    /** 模式项选中态：胶囊底 + 主色图标/文字 */
+    private fun applyModeItemState(v: View, selected: Boolean) {
+        v.setBackgroundResource(if (selected) R.drawable.bg_mode_tab_sel else R.drawable.bg_mode_tab)
+        val colorRes = if (selected) R.color.primary else R.color.onSurfaceVariant
+        v.findViewById<ImageView>(R.id.modeIcon).setColorFilter(ContextCompat.getColor(this, colorRes))
+        v.findViewById<TextView>(R.id.modeLabel).setTextColor(ContextCompat.getColor(this, colorRes))
     }
 
     private fun selectMode(id: String) {
@@ -175,18 +209,26 @@ class MainActivity : AppCompatActivity() {
     // 左侧列表：自由模式 -> 已添加图片（图层式列表）
     private fun buildFreeAssets() {
         leftListContainer.removeAllViews()
-        val title = TextView(this).apply { setText(R.string.images); setTextSize(12f); setTextColor(0x888888); }
+        val title = TextView(this).apply {
+            setText(R.string.images); setTextSize(12f)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurfaceVariant))
+        }
         leftListContainer.addView(title)
         if (canvas.elements.isEmpty()) {
-            val empty = TextView(this).apply { setText("点击下方“添加图片”"); setTextSize(12f); setTextColor(0x9AA0A6); }
+            val empty = TextView(this).apply {
+                setText("点击下方“添加图片”"); setTextSize(12f)
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurfaceVariant))
+            }
             leftListContainer.addView(empty)
             return
         }
         canvas.elements.sortedByDescending { it.zOrder }.forEachIndexed { idx, el ->
             val row = TextView(this).apply {
                 text = if (el is ImageElement) "图片 ${canvas.elements.size - idx}" else "文本"
-                setPadding(8, 10, 8, 10)
-                setBackgroundResource(R.drawable.bg_mode_tab)
+                textSize = 13f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurface))
+                setPadding(20, 24, 20, 24)
+                setBackgroundResource(R.drawable.bg_list_item)
                 setOnClickListener { canvas.selectElement(el); refreshPropertyPanel() }
             }
             leftListContainer.addView(row)
@@ -196,12 +238,25 @@ class MainActivity : AppCompatActivity() {
     // 左侧列表：网格模式 -> 模板缩略图（占位）
     private fun buildGridTemplates() {
         leftListContainer.removeAllViews()
-        val title = TextView(this).apply { setText(R.string.templates); setTextSize(12f); setTextColor(0x888888); }
+        val title = TextView(this).apply {
+            setText(R.string.templates); setTextSize(12f)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurfaceVariant))
+        }
         leftListContainer.addView(title)
-        val tips = TextView(this).apply { setText(R.string.templates_hint); setTextSize(11f); setTextColor(0x9AA0A6); }
+        val tips = TextView(this).apply {
+            setText(R.string.templates_hint); setTextSize(11f)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurfaceVariant))
+        }
         leftListContainer.addView(tips)
-        val btn = Button(this).apply {
+        val dip = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1f, resources.displayMetrics)
+        val btn = MaterialButton(this).apply {
             text = "选择图片(2-9张)"
+            backgroundTintList = ContextCompat.getColorStateList(this@MainActivity, R.color.secondaryContainer)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSecondaryContainer))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (8 * dip).toInt() }
             setOnClickListener { pickForGrid.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
         }
         leftListContainer.addView(btn)
@@ -210,32 +265,40 @@ class MainActivity : AppCompatActivity() {
     // 阶段5 海报模板
     private fun buildPosterTemplates() {
         leftListContainer.removeAllViews()
-        val title = TextView(this).apply { setText(R.string.templates); setTextSize(12f); setTextColor(0x888888); }
-        leftListContainer.addView(title)
-        val templates = listOf(R.string.template_5, R.string.template_6)
-        templates.forEach { tid ->
-            val btn = Button(this).apply {
-                setText(tid)
-                setOnClickListener { applyPosterTemplate(getString(tid)) }
-            }
-            leftListContainer.addView(btn)
+        addTemplateSectionTitle()
+        listOf(R.string.template_5, R.string.template_6).forEach { tid ->
+            leftListContainer.addView(templateButton(tid) { applyPosterTemplate(getString(tid)) })
         }
     }
 
     // 阶段5 拼图模板
     private fun buildPuzzleTemplates() {
         leftListContainer.removeAllViews()
-        val title = TextView(this).apply { setText(R.string.templates); setTextSize(12f); setTextColor(0x888888); }
-        leftListContainer.addView(title)
-        val templates = listOf(R.string.template_1, R.string.template_2, R.string.template_3, R.string.template_4)
-        templates.forEach { tid ->
-            val btn = Button(this).apply {
-                setText(tid)
-                setOnClickListener { applyPuzzleTemplate(getString(tid)) }
-            }
-            leftListContainer.addView(btn)
+        addTemplateSectionTitle()
+        listOf(R.string.template_1, R.string.template_2, R.string.template_3, R.string.template_4).forEach { tid ->
+            leftListContainer.addView(templateButton(tid) { applyPuzzleTemplate(getString(tid)) })
         }
     }
+
+    private fun addTemplateSectionTitle() {
+        leftListContainer.addView(TextView(this).apply {
+            setText(R.string.templates); setTextSize(12f)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurfaceVariant))
+        })
+    }
+
+    private fun templateButton(labelRes: Int, onClick: () -> Unit): View {
+        val dip = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1f, resources.displayMetrics)
+        return MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            setText(labelRes)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (6 * dip).toInt() }
+            setOnClickListener { onClick() }
+        }
+    }
+
 
     // ---------- 右侧属性面板 ----------
     private fun bindPropertyPanel() {
@@ -252,8 +315,14 @@ class MainActivity : AppCompatActivity() {
             refreshRefineUI(enter)
             if (enter) refreshPropertyPanel() else refreshPropertyPanel()
         }
-        findViewById<View>(R.id.btnErase).setOnClickListener { canvas.brushMode = FreeCanvasView.MaskBrush.ERASE }
-        findViewById<View>(R.id.btnPaint).setOnClickListener { canvas.brushMode = FreeCanvasView.MaskBrush.PAINT }
+        // 擦除/画笔分段切换（单选组）
+        val brushToggle = findViewById<MaterialButtonToggleGroup>(R.id.brushToggle)
+        brushToggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            canvas.brushMode =
+                if (checkedId == R.id.btnErase) FreeCanvasView.MaskBrush.ERASE else FreeCanvasView.MaskBrush.PAINT
+        }
+        brushToggle.check(R.id.btnErase)
         findViewById<View>(R.id.btnClearMask).setOnClickListener {
             canvas.clearMaskEdit()
             refreshRefineUI(false)
@@ -264,24 +333,18 @@ class MainActivity : AppCompatActivity() {
             refreshRefineUI(false)
             refreshPropertyPanel()
         }
-        val seekBrush = findViewById<SeekBar>(R.id.seekBrush)
-        seekBrush.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                canvas.brushRadius = p.toFloat().coerceAtLeast(4f)
-            }
-            override fun onStartTrackingTouch(s: SeekBar?) {}
-            override fun onStopTrackingTouch(s: SeekBar?) {}
-        })
-        canvas.brushRadius = seekBrush.progress.toFloat().coerceAtLeast(4f)
+        val seekBrush = findViewById<Slider>(R.id.seekBrush)
+        seekBrush.addOnChangeListener { _, value, _ ->
+            canvas.brushRadius = value.coerceAtLeast(4f)
+        }
+        canvas.brushRadius = seekBrush.value.coerceAtLeast(4f)
 
-        val seekOpacity = findViewById<SeekBar>(R.id.seekOpacity)
-        seekOpacity.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { canvas.setElementAlpha(p / 100f) }
-            override fun onStartTrackingTouch(s: SeekBar?) {}
-            override fun onStopTrackingTouch(s: SeekBar?) {}
-        })
+        val seekOpacity = findViewById<Slider>(R.id.seekOpacity)
+        seekOpacity.addOnChangeListener { _, value, _ ->
+            canvas.setElementAlpha(value / 100f)
+        }
 
-        val toggleLock = findViewById<ToggleButton>(R.id.toggleLock)
+        val toggleLock = findViewById<MaterialSwitch>(R.id.toggleLock)
         toggleLock.setOnCheckedChangeListener { _, isChecked ->
             canvas.selected?.let { it.locked = isChecked; canvas.invalidate() }
         }
@@ -301,7 +364,18 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.btnDelete).setOnClickListener { canvas.deleteSelected(); refreshPropertyPanel() }
     }
 
-    private fun bindBoardPanel() {
+    /** 打开画板设置 BottomSheet（背景色 / 尺寸），视图懒加载复用 */
+    private fun showBoardSheet() {
+        val dialog = boardSheet ?: BottomSheetDialog(this).also { d ->
+            val v = layoutInflater.inflate(R.layout.bottom_sheet_board, null)
+            bindBoardPanel(v)
+            d.setContentView(v)
+            boardSheet = d
+        }
+        dialog.show()
+    }
+
+    private fun bindBoardPanel(sheet: View) {
         val metrics = resources.displayMetrics
         val dip = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1f, metrics)
 
@@ -311,20 +385,23 @@ class MainActivity : AppCompatActivity() {
             0xFFE53935.toInt(), 0xFFD81B60.toInt(), 0xFF8E24AA.toInt(), 0xFF5E35B1.toInt(), 0xFF1E88E5.toInt(), 0xFF00ACC1.toInt(), 0xFF00897B.toInt(), 0xFF43A047.toInt(),
             0xFFFDD835.toInt(), 0xFFFFB300.toInt(), 0xFFFB8C00.toInt(), 0xFFF4511E.toInt(), 0xFF6D4C41.toInt(), 0xFF90A4AE.toInt()
         )
-        val bgRow = findViewById<LinearLayout>(R.id.bgColorRow)
-        val swatch = (20 * dip).toInt()
-        bgColors.forEach { color ->
+        val bgRow = sheet.findViewById<LinearLayout>(R.id.bgColorRow)
+        val swatch = (28 * dip).toInt()
+        bgColors.forEachIndexed { idx, color ->
             val drawable = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setColor(color)
-                setStroke((1.5f * dip).toInt(), 0xFFCCCCCC.toInt())
+                setStroke((1.5f * dip).toInt(), ContextCompat.getColor(this@MainActivity, R.color.outlineVariant))
             }
             val v = View(this).apply {
                 layoutParams = LinearLayout.LayoutParams(swatch, swatch).apply {
-                    marginEnd = (5 * dip).toInt()
+                    marginEnd = (8 * dip).toInt()
                 }
                 background = drawable
-                setOnClickListener { canvas.bgColor = color }
+                setOnClickListener {
+                    canvas.bgColor = color
+                    markSelectedSwatch(bgRow, idx, dip)
+                }
             }
             bgRow.addView(v)
         }
@@ -332,12 +409,12 @@ class MainActivity : AppCompatActivity() {
         // 自定义颜色按钮
         val customBg = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
-            setColor(0xFFFAFAFA.toInt())
-            setStroke((1.5f * dip).toInt(), 0xFF90A4AE.toInt())
+            setColor(ContextCompat.getColor(this@MainActivity, R.color.surfaceContainerHighest))
+            setStroke((1.5f * dip).toInt(), ContextCompat.getColor(this@MainActivity, R.color.outline))
         }
         val customView = View(this).apply {
             layoutParams = LinearLayout.LayoutParams(swatch, swatch).apply {
-                marginEnd = (5 * dip).toInt()
+                marginEnd = (8 * dip).toInt()
             }
             background = customBg
             setOnClickListener { showColorPicker() }
@@ -347,11 +424,11 @@ class MainActivity : AppCompatActivity() {
             gravity = android.view.Gravity.CENTER
             text = "+"
             textSize = 16f
-            setTextColor(0xFF37474F.toInt())
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurface))
         }
         val customWrap = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(swatch, swatch).apply {
-                marginEnd = (5 * dip).toInt()
+                marginEnd = (8 * dip).toInt()
             }
             addView(customView)
             addView(plus)
@@ -359,7 +436,7 @@ class MainActivity : AppCompatActivity() {
         }
         bgRow.addView(customWrap)
 
-        // 尺寸比例按钮（null 表示"屏幕分辨率"选项）
+        // 尺寸比例 Chip（null 表示"屏幕分辨率"选项）
         val sizes = listOf<Pair<String, Pair<Float, Float>?>>(
             "size_screen" to null,
             "size_square" to (1f to 1f),
@@ -369,15 +446,15 @@ class MainActivity : AppCompatActivity() {
             "size_9_16" to (9f to 16f)
         )
         val base = 1080f
-        val sizeRow = findViewById<LinearLayout>(R.id.sizeRow)
+        val sizeRow = sheet.findViewById<LinearLayout>(R.id.sizeRow)
         sizes.forEach { (nameRes, ratio) ->
-            val btn = Button(this).apply {
+            val chip = Chip(this).apply {
                 layoutParams = LinearLayout.LayoutParams(
-                    (44 * dip).toInt(),
-                    (30 * dip).toInt()
-                ).apply { marginEnd = (4 * dip).toInt() }
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = (8 * dip).toInt() }
                 text = getString(resources.getIdentifier(nameRes, "string", packageName))
-                textSize = 10f
+                isCheckable = false
                 val action: () -> Unit = if (ratio == null) {
                     { canvas.useScreenResolution() }
                 } else {
@@ -388,7 +465,21 @@ class MainActivity : AppCompatActivity() {
                 }
                 setOnClickListener { action() }
             }
-            sizeRow.addView(btn)
+            sizeRow.addView(chip)
+        }
+    }
+
+    /** 给点击的色块加主色描边（自定义颜色入口除外） */
+    private fun markSelectedSwatch(row: LinearLayout, index: Int, dip: Float) {
+        for (i in 0 until row.childCount) {
+            val child = row.getChildAt(i)
+            if (child is FrameLayout) continue
+            if (i != index) continue
+            child.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.TRANSPARENT)
+                setStroke((2.5f * dip).toInt(), ContextCompat.getColor(this@MainActivity, R.color.primary))
+            }
         }
     }
 
@@ -411,21 +502,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        fun makeSeek(initial: Int, onChanged: (Int) -> Unit): SeekBar {
-            return SeekBar(this).apply {
+        fun makeSeek(initial: Int, onChanged: (Int) -> Unit): Slider {
+            return Slider(this).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 )
-                max = 255
-                progress = initial
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                        onChanged(p)
-                    }
-                    override fun onStartTrackingTouch(s: SeekBar?) {}
-                    override fun onStopTrackingTouch(s: SeekBar?) {}
-                })
+                valueFrom = 0f
+                valueTo = 255f
+                stepSize = 1f
+                value = initial.toFloat()
+                addOnChangeListener { _, value, _ -> onChanged(value.toInt()) }
             }
         }
 
@@ -455,45 +542,45 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshPropertyPanel() {
         val el = canvas.selected
+        val refineToolbar = findViewById<View>(R.id.refineToolbar)
+        val brushSizeRow = findViewById<View>(R.id.brushSizeRow)
         if (el == null) {
             propContainer.visibility = View.GONE
             tvPanelTitle.visibility = View.GONE
             tvNoSelection.visibility = View.GONE
+            refineToolbar.visibility = View.GONE
+            brushSizeRow.visibility = View.GONE
             return
         }
-        propContainer.visibility = View.VISIBLE
-        tvPanelTitle.visibility = View.VISIBLE
-        tvNoSelection.visibility = View.GONE
-        val seekOpacity = findViewById<SeekBar>(R.id.seekOpacity)
-        seekOpacity.progress = (el.alpha * 100).toInt()
-        val toggleLock = findViewById<ToggleButton>(R.id.toggleLock)
-        toggleLock.isChecked = el.locked
-        // 文本元素不支持裁剪/滤镜/蒙版/替换
-        val isImg = el is ImageElement
-        listOf(R.id.btnReplace, R.id.btnCrop, R.id.btnFilter, R.id.btnMask).forEach {
-            findViewById<View>(it).visibility = if (isImg) View.VISIBLE else View.GONE
-        }
-        // 手动修正按钮：仅对去除背景(已抠图)的图片可用
-        val canRefine = isImg && (el as? ImageElement)?.segmented == true
-        findViewById<View>(R.id.btnRefine).visibility = if (canRefine) View.VISIBLE else View.GONE
-        // 未进入修正模式时，工具条/笔刷条隐藏
         val inEdit = (el as? ImageElement)?.inMaskEdit == true
+        // 三态互斥：修正态只显示精修条；选中态显示上下文面板；两者都叠加在常显全局行上
+        propContainer.visibility = if (inEdit) View.GONE else View.VISIBLE
+        tvPanelTitle.visibility = if (inEdit) View.GONE else View.VISIBLE
+        tvNoSelection.visibility = View.GONE
+        refineToolbar.visibility = if (inEdit) View.VISIBLE else View.GONE
+        brushSizeRow.visibility = if (inEdit) View.VISIBLE else View.GONE
+
         if (!inEdit) {
-            findViewById<View>(R.id.refineToolbar).visibility = View.GONE
-            findViewById<View>(R.id.brushSizeRow).visibility = View.GONE
+            val seekOpacity = findViewById<Slider>(R.id.seekOpacity)
+            seekOpacity.value = ((el.alpha * 100).toInt()).coerceIn(0, 100).toFloat()
+            val toggleLock = findViewById<MaterialSwitch>(R.id.toggleLock)
+            toggleLock.isChecked = el.locked
+            // 文本元素不支持裁剪/滤镜/蒙版/替换
+            val isImg = el is ImageElement
+            listOf(R.id.btnReplace, R.id.btnCrop, R.id.btnFilter, R.id.btnMask).forEach {
+                findViewById<View>(it).visibility = if (isImg) View.VISIBLE else View.GONE
+            }
+            // 手动修正按钮：仅对去除背景(已抠图)的图片可用
+            val canRefine = isImg && (el as? ImageElement)?.segmented == true
+            findViewById<View>(R.id.btnRefine).visibility = if (canRefine) View.VISIBLE else View.GONE
         }
         // 自由模式下刷新左侧图片列表
         if (mode == "free") buildFreeAssets()
     }
 
-    /** 切换手动修正工具条/笔刷条的可见性 */
+    /** 切换手动修正 UI（可见性统一由 refreshPropertyPanel 按三态计算） */
     private fun refreshRefineUI(editing: Boolean) {
-        findViewById<View>(R.id.refineToolbar).visibility = if (editing) View.VISIBLE else View.GONE
-        findViewById<View>(R.id.brushSizeRow).visibility = if (editing) View.VISIBLE else View.GONE
-        // 修正模式下，隐藏其他图片操作按钮避免误触
-        val editVis = if (editing) View.GONE else View.VISIBLE
-        listOf(R.id.btnReplace, R.id.btnCrop, R.id.btnFilter, R.id.btnMask, R.id.btnSegment, R.id.btnRefine)
-            .forEach { findViewById<View>(it).visibility = editVis }
+        refreshPropertyPanel()
     }
 
     // ---------- 添加图片 ----------
@@ -656,24 +743,83 @@ class MainActivity : AppCompatActivity() {
         dlg.show()
     }
 
+    /** 通用横向选项 BottomSheet（Chip 单行滚动） */
+    private fun showOptionSheet(titleRes: Int, names: List<String>, current: Int, onPick: (Int) -> Unit) {
+        val metrics = resources.displayMetrics
+        val dip = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 1f, metrics)
+        val dlg = BottomSheetDialog(this)
+        val scroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding((16 * dip).toInt(), (20 * dip).toInt(), (16 * dip).toInt(), (24 * dip).toInt())
+        }
+        names.forEachIndexed { i, name ->
+            row.addView(Chip(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = (8 * dip).toInt() }
+                text = name
+                isCheckable = true
+                isChecked = i == current
+                setOnClickListener {
+                    onPick(i)
+                    dlg.dismiss()
+                }
+            })
+        }
+        scroll.addView(row)
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                setText(titleRes)
+                textSize = 15f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurface))
+                setPadding((16 * dip).toInt(), (16 * dip).toInt(), 0, 0)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            })
+            addView(scroll)
+        }
+        dlg.setContentView(panel)
+        dlg.show()
+    }
+
+    private fun filterLabel(f: ImageFilter): String = when (f) {
+        ImageFilter.NONE -> "原图"
+        ImageFilter.BRIGHTNESS -> "亮度"
+        ImageFilter.CONTRAST -> "对比度"
+        ImageFilter.GRAYSCALE -> "黑白"
+        ImageFilter.SEPIA -> "复古"
+        ImageFilter.WARM -> "暖色"
+        ImageFilter.COOL -> "冷色"
+        ImageFilter.INVERT -> "反色"
+    }
+
+    private fun maskLabel(m: MaskShape): String = when (m) {
+        MaskShape.NONE -> "无"
+        MaskShape.CIRCLE -> "圆形"
+        MaskShape.HEART -> "心形"
+        MaskShape.STAR -> "星形"
+        MaskShape.BUBBLE -> "气泡"
+        MaskShape.ROUNDED_RECT -> "圆角"
+    }
+
     private fun openFilter() {
         val el = canvas.selected as? ImageElement ?: return
-        val names = ImageFilter.values().map { it.name }
-        AlertDialog.Builder(this).setTitle(R.string.filter)
-            .setItems(names.toTypedArray()) { _, i ->
-                (canvas.selected as? ImageElement)?.filter = ImageFilter.values()[i]
-                canvas.invalidate()
-            }.show()
+        val filters = ImageFilter.values()
+        showOptionSheet(R.string.filter, filters.map { filterLabel(it) }, filters.indexOf(el.filter)) { i ->
+            (canvas.selected as? ImageElement)?.filter = filters[i]
+            canvas.invalidate()
+        }
     }
 
     private fun openMask() {
         val el = canvas.selected as? ImageElement ?: return
-        val names = MaskShape.values().map { it.name }
-        AlertDialog.Builder(this).setTitle(R.string.mask)
-            .setItems(names.toTypedArray()) { _, i ->
-                (canvas.selected as? ImageElement)?.mask = MaskShape.values()[i]
-                canvas.invalidate()
-            }.show()
+        val shapes = MaskShape.values()
+        showOptionSheet(R.string.mask, shapes.map { maskLabel(it) }, shapes.indexOf(el.mask)) { i ->
+            (canvas.selected as? ImageElement)?.mask = shapes[i]
+            canvas.invalidate()
+        }
     }
 
     /** 抠人像：对当前选中图片做分割，得到透明背景结果 */

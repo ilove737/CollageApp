@@ -37,6 +37,8 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+    // Material Design 3 组件库（Slider/Switch/Chip/BottomSheet/TabLayout）
+    implementation("com.google.android.material:material:1.12.0")
     // 人像分割（MediaPipe，本地推理，模型 assets/selfie_segmenter.tflite）
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
     // 人像抠图（TFLite 原生推理，MODNet/RMBG，模型 assets/modnet.tflite）

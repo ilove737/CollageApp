@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 间距体系（8dp 网格） -->
+    <dimen name="spacing_xs">4dp</dimen>
+    <dimen name="spacing_sm">8dp</dimen>
+    <dimen name="spacing_md">12dp</dimen>
+    <dimen name="spacing_lg">16dp</dimen>
+
+    <!-- 圆角体系 -->
+    <dimen name="radius_md">12dp</dimen>
+    <dimen name="radius_lg">16dp</dimen>
+
+    <!-- 触控目标与工具件 -->
+    <dimen name="touch_min">48dp</dimen>
+    <dimen name="tool_icon_btn">44dp</dimen>
+    <dimen name="mode_rail_width">72dp</dimen>
+</resources>
