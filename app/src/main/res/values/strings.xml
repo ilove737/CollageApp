@@ -97,6 +97,10 @@
     <string name="clear_mask">清空</string>
     <string name="done">完成</string>
     <string name="brush_size">笔刷大小</string>
+    <string name="exit_confirm_title">放弃当前编辑？</string>
+    <string name="exit_confirm_message">画布上的内容尚未保存，退出后将丢失</string>
+    <string name="exit_stay">继续编辑</string>
+    <string name="exit_quit">退出</string>
     <string name="tab_actions">操作</string>
     <string name="tab_arrange">排列</string>
     <string name="tab_props">属性</string>

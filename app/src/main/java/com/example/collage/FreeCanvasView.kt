@@ -1,12 +1,15 @@
 package com.example.collage
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.*
-import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
 import android.util.AttributeSet
 import android.view.GestureDetector
 import android.view.MotionEvent
+import android.view.animation.DecelerateInterpolator
 import android.widget.ImageView
 import android.widget.FrameLayout
 import java.io.InputStream
@@ -30,6 +33,10 @@ class FreeCanvasView @JvmOverloads constructor(
         private const val CANVAS_MARGIN = 8f
         /** 允许的最大重叠面积比例（相对双方面积较小者），超过即视为无效位置 */
         private const val MAX_OVERLAP_RATIO = 0.12f
+
+        /** 精修模式视图缩放范围 */
+        private const val MASK_MIN_ZOOM = 1f
+        private const val MASK_MAX_ZOOM = 6f
     }
 
     /** 画板逻辑尺寸（可配置），默认 1080 正方形 */
@@ -49,6 +56,23 @@ class FreeCanvasView @JvmOverloads constructor(
 
     /** 画布整体缩放（由底部缩放滑条 / 手势控制），1f = 100% */
     var canvasScale = 1f
+
+    /** 视图平移偏移（屏幕像素），仅精修模式使用，退出即归零 */
+    private var viewPanX = 0f
+    private var viewPanY = 0f
+
+    // 进入精修前的视图状态（退出时恢复）
+    private var savedCanvasScale = 1f
+    private var savedPanX = 0f
+    private var savedPanY = 0f
+    private var maskViewAnimator: ValueAnimator? = null
+
+    // 精修模式双指视图手势起点状态
+    private var gvStartDist = 1f
+    private var gvStartViewScale = 1f
+    private var gvStartLMidX = 0f
+    private var gvStartLMidY = 0f
+    private var gestureViewInit = false
 
     /** 选中的元素变化时回调（用于右侧面板刷新） */
     var onSelectionChanged: ((CanvasElement?) -> Unit)? = null
@@ -80,6 +104,13 @@ class FreeCanvasView @JvmOverloads constructor(
         super.onSizeChanged(w, h, oldw, oldh)
         if (!userSetSize) useScreenResolution()
         recomputeScale()
+        // 精修中尺寸变化（如旋转屏幕）：按新视口重新放大居中；否则平移归零
+        val selImg = selected as? CanvasElement.ImageElement
+        if (selImg?.inMaskEdit == true) {
+            applyMaskViewNow(selImg)
+        } else {
+            viewPanX = 0f; viewPanY = 0f
+        }
     }
 
     private fun recomputeScale() {
@@ -90,16 +121,16 @@ class FreeCanvasView @JvmOverloads constructor(
     private fun toLogical(px: Float, py: Float): Pair<Float, Float> {
         val cx = width / 2f
         val cy = height / 2f
-        val lx = (px - cx) / (scale * canvasScale) + logicalW / 2f
-        val ly = (py - cy) / (scale * canvasScale) + logicalH / 2f
+        val lx = (px - cx - viewPanX) / (scale * canvasScale) + logicalW / 2f
+        val ly = (py - cy - viewPanY) / (scale * canvasScale) + logicalH / 2f
         return lx to ly
     }
 
     private fun toScreen(lx: Float, ly: Float): Pair<Float, Float> {
         val cx = width / 2f
         val cy = height / 2f
-        val sx = (lx - logicalW / 2f) * (scale * canvasScale) + cx
-        val sy = (ly - logicalH / 2f) * (scale * canvasScale) + cy
+        val sx = (lx - logicalW / 2f) * (scale * canvasScale) + cx + viewPanX
+        val sy = (ly - logicalH / 2f) * (scale * canvasScale) + cy + viewPanY
         return sx to sy
     }
 
@@ -134,9 +165,15 @@ class FreeCanvasView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
+        val inMaskEdit = (selected as? CanvasElement.ImageElement)?.inMaskEdit == true
+
         if (ev.pointerCount >= 2) {
+            // 精修模式双指 = 视图平移 + 缩放（不改动图片本身）
+            if (inMaskEdit) {
+                handleMaskViewGesture(ev)
+                return true
+            }
             // 双指：缩放 + 旋转选中元素
-            val (lx, ly) = toLogical(ev.getX(0), ev.getY(0))
             val el = selected ?: return gestureDetector.onTouchEvent(ev)
             if (el.locked) return true
             val dx = ev.getX(1) - ev.getX(0)
@@ -252,6 +289,9 @@ class FreeCanvasView @JvmOverloads constructor(
             if (el.userMask == null) {
                 el.userMask = createInitialMask(el.bitmap)
             }
+            enterMaskView(el)
+        } else {
+            exitMaskView()
         }
         invalidate()
     }
@@ -260,6 +300,7 @@ class FreeCanvasView @JvmOverloads constructor(
     fun exitMaskEdit() {
         (selected as? CanvasElement.ImageElement)?.inMaskEdit = false
         masking = false
+        exitMaskView()
         invalidate()
     }
 
@@ -270,7 +311,142 @@ class FreeCanvasView @JvmOverloads constructor(
         el.userMask = null
         el.inMaskEdit = false
         masking = false
+        exitMaskView()
         invalidate()
+    }
+
+    // ---------- 精修模式视图缩放/平移 ----------
+
+    private fun cancelMaskAnimator() {
+        maskViewAnimator?.cancel()
+        maskViewAnimator = null
+    }
+
+    /** 进入精修：记录当前视图状态，放大并居中被修图片（带动画） */
+    private fun enterMaskView(el: CanvasElement) {
+        if (width == 0 || height == 0) return
+        cancelMaskAnimator()
+        savedCanvasScale = canvasScale
+        savedPanX = viewPanX; savedPanY = viewPanY
+        applyMaskView(el, animate = true)
+    }
+
+    /** 退出精修：平滑恢复进入前的视图 */
+    fun exitMaskView() {
+        cancelMaskAnimator()
+        animateMaskView(canvasScale, viewPanX, viewPanY, savedCanvasScale, savedPanX, savedPanY)
+    }
+
+    /** 按精修规则立即设置视图（无动画）：用于尺寸变化后的重定位 */
+    private fun applyMaskViewNow(el: CanvasElement) {
+        cancelMaskAnimator()
+        canvasScale = maskZoomFor(el)
+        val p = panToCenter(el, canvasScale)
+        viewPanX = p.first; viewPanY = p.second
+        clampViewPan()
+        invalidate()
+    }
+
+    private fun applyMaskView(el: CanvasElement, animate: Boolean) {
+        if (!animate) { applyMaskViewNow(el); return }
+        val fromS = canvasScale; val fromPX = viewPanX; val fromPY = viewPanY
+        val toS = maskZoomFor(el)
+        val to = panToCenter(el, toS)
+        animateMaskView(fromS, fromPX, fromPY, toS, to.first, to.second)
+    }
+
+    /** 目标放大倍数：元素旋转后外接长边适配视口短边，限制在 [1.5, 4] */
+    private fun maskZoomFor(el: CanvasElement): Float {
+        val rad = Math.toRadians(abs(el.rotation).toDouble())
+        val c = abs(cos(rad)).toFloat(); val s = abs(sin(rad)).toFloat()
+        val wPx = el.w * scale; val hPx = el.h * scale
+        val rotLong = max(wPx * c + hPx * s, wPx * s + hPx * c)
+        val viewMin = min(width, height).toFloat()
+        return (viewMin / rotLong.coerceAtLeast(1f)).coerceIn(1.5f, 4f)
+    }
+
+    /** 使元素中心对齐视口中心所需平移量（在目标缩放下反解映射式） */
+    private fun panToCenter(el: CanvasElement, targetScale: Float): Pair<Float, Float> {
+        val k = scale * targetScale
+        val cxL = el.x + el.w / 2f - logicalW / 2f
+        val cyL = el.y + el.h / 2f - logicalH / 2f
+        return Pair(-cxL * k, -cyL * k)
+    }
+
+    private fun animateMaskView(
+        fromS: Float, fromPX: Float, fromPY: Float,
+        toS: Float, toPX: Float, toPY: Float
+    ) {
+        cancelMaskAnimator()
+        val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 220
+            interpolator = DecelerateInterpolator()
+            addUpdateListener {
+                val t = it.animatedValue as Float
+                canvasScale = fromS + (toS - fromS) * t
+                viewPanX = fromPX + (toPX - fromPX) * t
+                viewPanY = fromPY + (toPY - fromPY) * t
+                invalidate()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) { maskViewAnimator = null }
+            })
+        }
+        maskViewAnimator = anim
+        anim.start()
+    }
+
+    /** 平移软边界：防止画布被拖出可视范围 */
+    private fun clampViewPan() {
+        val k = scale * canvasScale
+        val maxX = logicalW * k * 0.6f
+        val maxY = logicalH * k * 0.6f
+        viewPanX = viewPanX.coerceIn(-maxX, maxX)
+        viewPanY = viewPanY.coerceIn(-maxY, maxY)
+    }
+
+    private fun midPoint(ev: MotionEvent) =
+        Pair((ev.getX(0) + ev.getX(1)) / 2f, (ev.getY(0) + ev.getY(1)) / 2f)
+
+    private fun fingerDist(ev: MotionEvent): Float {
+        val dx = ev.getX(1) - ev.getX(0)
+        val dy = ev.getY(1) - ev.getY(0)
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    /**
+     * 精修模式双指手势：捏合=缩放视图（围绕起始中点锚定），拖动=平移视图。
+     * 起始中点的逻辑坐标保持不变，一步公式同时处理锚定缩放与拖动。
+     */
+    private fun handleMaskViewGesture(ev: MotionEvent) {
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                cancelMaskAnimator()
+                val mid = midPoint(ev)
+                gvStartDist = fingerDist(ev).coerceAtLeast(1f)
+                gvStartViewScale = canvasScale
+                val lm = toLogical(mid.first, mid.second)
+                gvStartLMidX = lm.first; gvStartLMidY = lm.second
+                gestureViewInit = true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!gestureViewInit) return
+                val ratio = fingerDist(ev) / gvStartDist
+                val newScale = (gvStartViewScale * ratio).coerceIn(MASK_MIN_ZOOM, MASK_MAX_ZOOM)
+                val cur = midPoint(ev)
+                val k = scale * newScale
+                viewPanX = cur.first - ((gvStartLMidX - logicalW / 2f) * k + width / 2f)
+                viewPanY = cur.second - ((gvStartLMidY - logicalH / 2f) * k + height / 2f)
+                canvasScale = newScale
+                clampViewPan()
+                invalidate()
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_UP -> {
+                gestureViewInit = false
+                clampViewPan()
+                invalidate()
+            }
+        }
     }
 
     /** 创建初始全白蒙版（表示全部保留），尺寸与 bitmap 同比例缩小以省内存 */
@@ -320,39 +496,37 @@ class FreeCanvasView @JvmOverloads constructor(
         val py = (fy * mask.height).toInt().coerceIn(0, mask.height - 1)
         // 笔刷半径映射到蒙版像素
         val rPx = (brushRadius / w * mask.width).coerceAtLeast(1f)
-        val c = Canvas(mask)
-        val p = Paint().apply {
-            isAntiAlias = true
-            style = Paint.Style.FILL
-            if (erase) {
-                // CLEAR：用源 alpha 作为清除强度，径向渐变实现软边擦除
-                xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-            } // PAINT：默认 source-over，白色渐变叠加到透明区即可补回
-        }
-        // 中心 alpha=255(实心)，向边缘渐隐到 0(软边)
-        val center = if (erase) 0xFFFFFFFF.toInt() else 0xFFFFFFFF.toInt()
-        val grad = RadialGradient(px.toFloat(), py.toFloat(), rPx, center, 0x00000000.toInt(), Shader.TileMode.CLAMP)
-        p.shader = grad
-        c.drawCircle(px.toFloat(), py.toFloat(), rPx, p)
+        maskInkPaint.xfermode = if (erase) clearInkMode else null
+        // 中心 alpha=255(实心)，向边缘渐隐到 0(软边)；渐变随位置/半径变化，需每次重建
+        val grad = RadialGradient(px.toFloat(), py.toFloat(), rPx, 0xFFFFFFFF.toInt(), 0x00000000.toInt(), Shader.TileMode.CLAMP)
+        maskInkPaint.shader = grad
+        reusableMaskCanvas.setBitmap(mask)
+        reusableMaskCanvas.drawCircle(px.toFloat(), py.toFloat(), rPx, maskInkPaint)
+        maskInkPaint.shader = null
+        maskInkPaint.xfermode = null
     }
 
-    /** 手动修正模式的触摸处理：按下/移动时在蒙版上绘制 */
+    /** 笔刷相对触点的左上偏移：圆边缘恒距触点 16dp，避免手指遮挡视线 */
+    private fun brushOffset(): Float = brushRadius + 16f * resources.displayMetrics.density
+
+    /** 手动修正模式的触摸处理：按下/移动时在蒙版上绘制（作用点与光标统一在触点左上方） */
     private fun handleMaskTouch(ev: MotionEvent, el: CanvasElement.ImageElement) {
+        val off = -brushOffset()
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 masking = true
-                lastBrushX = ev.x; lastBrushY = ev.y
-                paintMaskStroke(el, ev.x, ev.y)
+                lastBrushX = ev.x + off; lastBrushY = ev.y + off
+                paintMaskStroke(el, lastBrushX, lastBrushY)
                 invalidate()
             }
             MotionEvent.ACTION_MOVE -> {
                 if (!masking) return
                 // 插值多段，避免快速移动出现断点
-                val (sx, sy) = Pair(ev.x, ev.y)
+                val (sx, sy) = Pair(ev.x + off, ev.y + off)
                 lastBrushX = sx; lastBrushY = sy
                 val hist = ev.historySize
                 if (hist > 0) {
-                    for (i in 0 until hist) paintMaskStroke(el, ev.getHistoricalX(i), ev.getHistoricalY(i))
+                    for (i in 0 until hist) paintMaskStroke(el, ev.getHistoricalX(i) + off, ev.getHistoricalY(i) + off)
                 }
                 paintMaskStroke(el, sx, sy)
                 invalidate()
@@ -373,19 +547,14 @@ class FreeCanvasView @JvmOverloads constructor(
         val sizeH = logicalH * scale * canvasScale
         canvas.save()
         canvas.clipRect(bx, by, bx + sizeW, by + sizeH)
-        val bgPaint = Paint().apply { color = bgColor }
+        bgPaint.color = bgColor
         canvas.drawRect(bx, by, bx + sizeW, by + sizeH, bgPaint)
 
-        val sorted = elements.sortedBy { it.zOrder }
+        val sorted = if (elements.size > 1) elements.sortedBy { it.zOrder } else elements
         for (el in sorted) drawElement(canvas, el)
         canvas.restore()
 
         // 画板边界线
-        val borderPaint = Paint().apply {
-            color = 0xFFCCCCCC.toInt()
-            style = Paint.Style.STROKE
-            strokeWidth = 1.5f
-        }
         canvas.drawRect(bx, by, bx + sizeW, by + sizeH, borderPaint)
 
         // 选中框 + 控制点（不裁剪）
@@ -402,19 +571,14 @@ class FreeCanvasView @JvmOverloads constructor(
         val w = el.w * scale * canvasScale
         val h = el.h * scale * canvasScale
         // 在元素区域上叠一层半透明遮罩，提示"可编辑"（随元素旋转，贴合图片轮廓）
-        val overlay = Paint().apply { color = 0x22000000.toInt(); style = Paint.Style.FILL }
         canvas.save()
         canvas.translate(tlx + w / 2f, tly + h / 2f)
         canvas.rotate(el.rotation)
-        canvas.drawRect(-w / 2f, -h / 2f, w / 2f, h / 2f, overlay)
+        canvas.drawRect(-w / 2f, -h / 2f, w / 2f, h / 2f, maskOverlayPaint)
         canvas.restore()
         // 笔刷光标（跟随手指，不随元素旋转）
-        val cur = Paint().apply {
-            color = if (brushMode == MaskBrush.ERASE) 0xFFE53935.toInt() else 0xFF43A047.toInt()
-            style = Paint.Style.STROKE
-            strokeWidth = 2f
-        }
-        canvas.drawCircle(lastBrushX, lastBrushY, brushRadius, cur)
+        brushCursorPaint.color = if (brushMode == MaskBrush.ERASE) 0xFFE53935.toInt() else 0xFF43A047.toInt()
+        canvas.drawCircle(lastBrushX, lastBrushY, brushRadius, brushCursorPaint)
     }
 
     private fun drawElement(canvas: Canvas, el: CanvasElement) {
@@ -426,68 +590,102 @@ class FreeCanvasView @JvmOverloads constructor(
         canvas.rotate(el.rotation)
         canvas.saveLayerAlpha(-w / 2f, -h / 2f, w / 2f, h / 2f, (el.alpha * 255).toInt(), Canvas.ALL_SAVE_FLAG)
         when (el) {
-            is CanvasElement.ImageElement -> {
-                var bmp = applyEffects(el)
-                if (el.userMask != null) bmp = composeUserMask(el, bmp)
-                val drawable = BitmapDrawable(resources, bmp)
-                drawable.setBounds(-(w / 2f).toInt(), -(h / 2f).toInt(), (w / 2f).toInt(), (h / 2f).toInt())
-                drawable.draw(canvas)
-            }
+            is CanvasElement.ImageElement -> drawImageElement(canvas, el, w, h)
             is CanvasElement.TextElement -> {
-                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = el.color
-                    textSize = el.textSizeSp * scale * canvasScale
-                    textAlign = Paint.Align.CENTER
-                }
-                val font = paint.fontMetrics
-                canvas.drawText(el.text, 0f, -(font.ascent + font.descent) / 2f, paint)
+                textPaint.color = el.color
+                textPaint.textSize = el.textSizeSp * scale * canvasScale
+                val font = textPaint.fontMetrics
+                canvas.drawText(el.text, 0f, -(font.ascent + font.descent) / 2f, textPaint)
             }
         }
         canvas.restore()
         canvas.restore()
     }
 
-    /** 阶段4：应用滤镜 + 蒙版（带缓存避免每帧重算） */
-    private val effectCache = mutableMapOf<CanvasElement.ImageElement, Pair<Pair<ImageFilter, MaskShape>, Bitmap>>()
+    // ---------- 复用绘制对象（避免每帧分配引发 GC 卡顿） ----------
+    private val framePaint = Paint().apply { isFilterBitmap = true }
+    private val shaderPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val dstInMode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+    private val tmpRect = RectF()
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    private val bgPaint = Paint().apply { style = Paint.Style.FILL }
+    private val borderPaint = Paint().apply {
+        color = 0xFFCCCCCC.toInt(); style = Paint.Style.STROKE; strokeWidth = 1.5f
+    }
+    private val selStrokePaint = Paint().apply {
+        color = Color.parseColor("#3F51B5"); style = Paint.Style.STROKE; strokeWidth = 2f
+    }
+    private val selFillPaint = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
+    private val maskOverlayPaint = Paint().apply { color = 0x22000000.toInt(); style = Paint.Style.FILL }
+    private val brushCursorPaint = Paint().apply { style = Paint.Style.STROKE; strokeWidth = 2f }
+
+    // 蒙版笔触复用对象
+    private val maskInkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL; isAntiAlias = true
+    }
+    private val clearInkMode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+    private val reusableMaskCanvas = Canvas()
+
+    /** 阶段4：应用滤镜 + 蒙版形状（带缓存；校验源图引用防止抠图替换后返回旧图） */
+    private class EffectEntry(
+        val key: Pair<ImageFilter, MaskShape>,
+        val srcRef: Bitmap,
+        val out: Bitmap
+    )
+
+    private val effectCache = mutableMapOf<CanvasElement.ImageElement, EffectEntry>()
+
     private fun applyEffects(el: CanvasElement.ImageElement): Bitmap {
         val key = el.filter to el.mask
         val cached = effectCache[el]
-        if (cached != null && cached.first == key) return cached.second
+        if (cached != null && cached.key == key && cached.srcRef === el.bitmap) return cached.out
         var bmp = el.bitmap
         if (el.filter != ImageFilter.NONE) bmp = ImageEffects.applyFilter(bmp, el.filter)
         if (el.mask != MaskShape.NONE) bmp = ImageEffects.applyMask(bmp, el.mask)
-        // 释放旧缓存
-        cached?.let { if (it.second != el.bitmap) {} }
-        effectCache[el] = key to bmp
+        effectCache[el] = EffectEntry(key, el.bitmap, bmp)
         return bmp
     }
 
-    /**
-     * 将用户手动修正蒙版合成到已渲染的 bitmap 上。
-     * userMask 为单通道灰度（0=透明，255=不透明），与 bitmap 同尺寸，
-     * 这里把 bitmap 每个像素的 alpha 与 mask 对应像素相乘后再映射回 0..255。
-     */
-    private fun composeUserMask(el: CanvasElement.ImageElement, src: Bitmap): Bitmap {
-        val mask = el.userMask ?: return src
-        if (mask.width <= 0 || mask.height <= 0) return src
-        val w = src.width
-        val h = src.height
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val srcPx = IntArray(w * h); src.getPixels(srcPx, 0, w, 0, 0, w, h)
-        val maskPx = IntArray(mask.width * mask.height); mask.getPixels(maskPx, 0, mask.width, 0, 0, mask.width, mask.height)
-        val mw = mask.width; val mh = mask.height
-        for (y in 0 until h) {
-            val my = (y * mh / h).coerceIn(0, mh - 1)
-            for (x in 0 until w) {
-                val mx = (x * mw / w).coerceIn(0, mw - 1)
-                val m = ((maskPx[my * mw + mx] ushr 24) and 0xFF) / 255f
-                val p = srcPx[y * w + x]
-                val a = (Color.alpha(p) * m + 0.5f).toInt().coerceIn(0, 255)
-                srcPx[y * w + x] = (a shl 24) or (p and 0x00FFFFFF)
-            }
+    /** 元素被移除/替换时清理滤镜缓存，防旧实例与位图滞留内存 */
+    private fun invalidateEffectCache(el: CanvasElement.ImageElement?) {
+        if (el != null) effectCache.remove(el)
+    }
+
+    // 蒙版 shader 缓存（同一蒙版反复采样，零拷贝跟随最新笔触）
+    private var shaderMaskRef: Bitmap? = null
+    private var maskShader: BitmapShader? = null
+
+    private fun maskShaderFor(mask: Bitmap): BitmapShader {
+        if (shaderMaskRef !== mask || maskShader == null) {
+            maskShader = BitmapShader(mask, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+            shaderMaskRef = mask
         }
-        out.setPixels(srcPx, 0, w, 0, 0, w, h)
-        return out
+        return maskShader!!
+    }
+
+    /**
+     * 屏显与导出共用的图片元素绘制：
+     * 先画滤镜处理后的位图，再以 DST_IN 把用户蒙版的 alpha 乘上去——
+     * 蒙版为 ALPHA_8 单通道图，其 alpha 即蒙版值，GPU 一次 shader 矩形即可完成合成，
+     * 替代旧的每帧全像素 CPU 循环（composeUserMask），消除精修卡顿。
+     */
+    private fun drawImageElement(canvas: Canvas, el: CanvasElement.ImageElement, w: Float, h: Float) {
+        val bmp = applyEffects(el)
+        tmpRect.set(-w / 2f, -h / 2f, w / 2f, h / 2f)
+        canvas.drawBitmap(bmp, null, tmpRect, framePaint)
+        val mask = el.userMask
+        if (mask != null && !mask.isRecycled && mask.width > 0 && mask.height > 0) {
+            val m = Matrix()
+            m.setScale(w / mask.width, h / mask.height)
+            m.postTranslate(-w / 2f, -h / 2f)
+            val shader = maskShaderFor(mask)
+            shader.setLocalMatrix(m)
+            shaderPaint.shader = shader
+            shaderPaint.xfermode = dstInMode
+            canvas.drawRect(tmpRect, shaderPaint)
+            shaderPaint.shader = null
+            shaderPaint.xfermode = null
+        }
     }
 
     private fun drawSelection(canvas: Canvas, el: CanvasElement) {
@@ -501,23 +699,20 @@ class FreeCanvasView @JvmOverloads constructor(
         canvas.save()
         canvas.translate(cx, cy)
         canvas.rotate(el.rotation)
-        val paint = Paint().apply { color = Color.parseColor("#3F51B5"); style = Paint.Style.STROKE; strokeWidth = 2f }
-        canvas.drawRect(-w / 2f, -h / 2f, w / 2f, h / 2f, paint)
+        canvas.drawRect(-w / 2f, -h / 2f, w / 2f, h / 2f, selStrokePaint)
         // 控制点
         val hs = HANDLE * scale * canvasScale
         val pts = listOf(
             -w / 2f to -h / 2f, w / 2f to -h / 2f, -w / 2f to h / 2f, w / 2f to h / 2f
         )
-        val fill = Paint().apply { color = Color.WHITE; style = Paint.Style.FILL }
-        val stroke = Paint().apply { color = Color.parseColor("#3F51B5"); style = Paint.Style.STROKE; strokeWidth = 2f }
         for ((px, py) in pts) {
-            canvas.drawCircle(px, py, hs, fill)
-            canvas.drawCircle(px, py, hs, stroke)
+            canvas.drawCircle(px, py, hs, selFillPaint)
+            canvas.drawCircle(px, py, hs, selStrokePaint)
         }
         // 旋转手柄
-        canvas.drawLine(0f, -h / 2f, 0f, -h / 2f - hs * 2, paint)
-        canvas.drawCircle(0f, -h / 2f - hs * 2, hs, fill)
-        canvas.drawCircle(0f, -h / 2f - hs * 2, hs, stroke)
+        canvas.drawLine(0f, -h / 2f, 0f, -h / 2f - hs * 2, selStrokePaint)
+        canvas.drawCircle(0f, -h / 2f - hs * 2, hs, selFillPaint)
+        canvas.drawCircle(0f, -h / 2f - hs * 2, hs, selStrokePaint)
         canvas.restore()
     }
 
@@ -555,6 +750,7 @@ class FreeCanvasView @JvmOverloads constructor(
 
     fun rebindImage(uri: Uri, bmp: Bitmap) {
         val el = selected as? CanvasElement.ImageElement ?: return
+        invalidateEffectCache(el)
         elements[elements.indexOf(el)] = el.copy(uri = uri, bitmap = bmp)
         select(elements[elements.indexOf(el)])
         invalidate()
@@ -570,7 +766,10 @@ class FreeCanvasView @JvmOverloads constructor(
     }
 
     fun deleteSelected() {
-        selected?.let { elements.remove(it); select(null); invalidate() }
+        selected?.let {
+            if (it is CanvasElement.ImageElement) invalidateEffectCache(it)
+            elements.remove(it); select(null); invalidate()
+        }
     }
 
     fun bringToFrontLayer() {
@@ -752,17 +951,12 @@ class FreeCanvasView @JvmOverloads constructor(
             c.rotate(el.rotation)
             c.saveLayerAlpha(-el.w / 2f, -el.h / 2f, el.w / 2f, el.h / 2f, (el.alpha * 255).toInt(), Canvas.ALL_SAVE_FLAG)
             when (el) {
-                is CanvasElement.ImageElement -> {
-                    var rbmp = applyEffects(el)
-                    if (el.userMask != null) rbmp = composeUserMask(el, rbmp)
-                    val dw = BitmapDrawable(resources, rbmp)
-                    dw.setBounds(-(el.w / 2f).toInt(), -(el.h / 2f).toInt(), (el.w / 2f).toInt(), (el.h / 2f).toInt())
-                    dw.draw(c)
-                }
+                is CanvasElement.ImageElement -> drawImageElement(c, el, el.w, el.h)
                 is CanvasElement.TextElement -> {
-                    val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = el.color; textSize = el.textSizeSp; textAlign = Paint.Align.CENTER }
-                    val fm = p.fontMetrics
-                    c.drawText(el.text, 0f, -(fm.ascent + fm.descent) / 2f, p)
+                    textPaint.color = el.color
+                    textPaint.textSize = el.textSizeSp
+                    val fm = textPaint.fontMetrics
+                    c.drawText(el.text, 0f, -(fm.ascent + fm.descent) / 2f, textPaint)
                 }
             }
             c.restore()

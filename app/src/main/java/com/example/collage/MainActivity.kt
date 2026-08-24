@@ -19,6 +19,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Gravity
 import android.widget.*
+import androidx.activity.addCallback
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -104,8 +105,11 @@ class MainActivity : AppCompatActivity() {
         canvas.onSelectionChanged = { refreshPropertyPanel() }
 
         // 顶栏
-        findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
+        findViewById<View>(R.id.btnBack).setOnClickListener { handleBack() }
         findViewById<View>(R.id.btnSave).setOnClickListener { mergeAndShare() }
+
+        // 系统返回键/手势：与顶栏 ✕ 一致走统一确认逻辑
+        onBackPressedDispatcher.addCallback(this) { handleBack() }
 
         // 底部全局工具行
         findViewById<View>(R.id.btnAdd).setOnClickListener { addImage() }
@@ -554,9 +558,12 @@ class MainActivity : AppCompatActivity() {
             tvNoSelection.visibility = View.GONE
             refineToolbar.visibility = View.GONE
             brushSizeRow.visibility = View.GONE
+            findViewById<Slider>(R.id.seekZoom).isEnabled = true
             return
         }
         val inEdit = (el as? ImageElement)?.inMaskEdit == true
+        // 精修模式双指用于视图平移/缩放，禁用底部全局缩放滑条避免冲突
+        findViewById<Slider>(R.id.seekZoom).isEnabled = !inEdit
         // 三态互斥：修正态只显示精修条；选中态显示上下文面板；两者都叠加在常显全局行上
         propContainer.visibility = if (inEdit) View.GONE else View.VISIBLE
         tvPanelTitle.visibility = if (inEdit) View.GONE else View.VISIBLE
@@ -1003,5 +1010,34 @@ class MainActivity : AppCompatActivity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(Intent.createChooser(intent, "分享拼图"))
+    }
+
+    // ---------- 返回退出确认 ----------
+
+    /**
+     * 统一返回逻辑（顶栏 ✕ 与系统返回键共用）：
+     * 1. 蒙版精修模式中 → 先退出精修回到正常编辑；
+     * 2. 画布有内容（或网格模式已选图）→ 弹确认框防误退；
+     * 3. 否则直接退出。
+     */
+    private fun handleBack() {
+        val selImg = canvas.selected as? ImageElement
+        if (selImg?.inMaskEdit == true) {
+            canvas.exitMaskEdit()
+            refreshRefineUI(false)
+            refreshPropertyPanel()
+            return
+        }
+        val hasWork = canvas.elements.isNotEmpty() || (mode == "grid" && curUris.isNotEmpty())
+        if (hasWork) showExitConfirm() else finish()
+    }
+
+    private fun showExitConfirm() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.exit_confirm_title)
+            .setMessage(R.string.exit_confirm_message)
+            .setNegativeButton(R.string.exit_stay, null)
+            .setPositiveButton(R.string.exit_quit) { _, _ -> finish() }
+            .show()
     }
 }
