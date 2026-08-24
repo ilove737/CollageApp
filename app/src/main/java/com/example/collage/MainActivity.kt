@@ -389,12 +389,54 @@ class MainActivity : AppCompatActivity() {
 
         // 背景色色块
         val bgColors = listOf(
-            0xFFFFFFFF.toInt(), 0xFFF5F5F5.toInt(), 0xFFECEFF1.toInt(), 0xFFCFD8DC.toInt(), 0xFF9E9E9E.toInt(), 0xFF616161.toInt(), 0xFF212121.toInt(), 0xFF000000.toInt(),
-            0xFFE53935.toInt(), 0xFFD81B60.toInt(), 0xFF8E24AA.toInt(), 0xFF5E35B1.toInt(), 0xFF1E88E5.toInt(), 0xFF00ACC1.toInt(), 0xFF00897B.toInt(), 0xFF43A047.toInt(),
-            0xFFFDD835.toInt(), 0xFFFFB300.toInt(), 0xFFFB8C00.toInt(), 0xFFF4511E.toInt(), 0xFF6D4C41.toInt(), 0xFF90A4AE.toInt()
+            0xFFF5F0EB.toInt(), 0xFFFFFFFF.toInt(), 0xFFF5F5F5.toInt(), 0xFFECEFF1.toInt(), 0xFFE0DEDA.toInt(), 0xFFD7CCC8.toInt(), 0xFFCFD8DC.toInt(), 0xFFD5D8DC.toInt(),
+            0xFFF8BBD0.toInt(), 0xFFE1BEE7.toInt(), 0xFFD1C4E9.toInt(), 0xFFC5CAE9.toInt(), 0xFFBBDEFB.toInt(), 0xFFB3E5FC.toInt(), 0xFFB2EBF2.toInt(), 0xFFB2DFDB.toInt(),
+            0xFFC8E6C9.toInt(), 0xFFDCEDC8.toInt(), 0xFFF0F4C3.toInt(), 0xFFFFECB3.toInt(), 0xFFFFE0B2.toInt(), 0xFFFFCCBC.toInt()
         )
-        val bgRow = sheet.findViewById<LinearLayout>(R.id.bgColorRow)
+        val bgRow = sheet.findViewById<GridLayout>(R.id.bgColorRow)
         val swatch = (28 * dip).toInt()
+
+        // 自定义颜色按钮（放在最前面）
+        val customBg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(ContextCompat.getColor(this@MainActivity, R.color.surfaceContainerHighest))
+            setStroke((1.5f * dip).toInt(), ContextCompat.getColor(this@MainActivity, R.color.outline))
+        }
+        val customView = View(this).apply {
+            layoutParams = GridLayout.LayoutParams().apply {
+                width = 0
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                height = swatch
+                setMargins(0, 0, 0, (6 * dip).toInt())
+            }
+            background = customBg
+            setOnClickListener { showColorPicker() }
+        }
+        val plus = android.widget.TextView(this).apply {
+            layoutParams = GridLayout.LayoutParams().apply {
+                width = 0
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                height = swatch
+            }
+            gravity = android.view.Gravity.CENTER
+            text = "+"
+            textSize = 16f
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurface))
+        }
+        val customWrap = FrameLayout(this).apply {
+            layoutParams = GridLayout.LayoutParams().apply {
+                width = 0
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                height = swatch
+                setMargins(0, 0, 0, (6 * dip).toInt())
+            }
+            addView(customView)
+            addView(plus)
+            setOnClickListener { showColorPicker() }
+        }
+        bgRow.addView(customWrap)
+
+        // 预设颜色色块
         bgColors.forEachIndexed { idx, color ->
             val drawable = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
@@ -402,47 +444,21 @@ class MainActivity : AppCompatActivity() {
                 setStroke((1.5f * dip).toInt(), ContextCompat.getColor(this@MainActivity, R.color.outlineVariant))
             }
             val v = View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(swatch, swatch).apply {
-                    marginEnd = (8 * dip).toInt()
+                tag = color
+                layoutParams = GridLayout.LayoutParams().apply {
+                    width = 0
+                    columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                    height = swatch
+                    setMargins(0, 0, 0, (6 * dip).toInt())
                 }
                 background = drawable
                 setOnClickListener {
                     canvas.bgColor = color
-                    markSelectedSwatch(bgRow, idx, dip)
+                    markSelectedSwatch(bgRow, idx + 1, dip)
                 }
             }
             bgRow.addView(v)
         }
-
-        // 自定义颜色按钮
-        val customBg = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(ContextCompat.getColor(this@MainActivity, R.color.surfaceContainerHighest))
-            setStroke((1.5f * dip).toInt(), ContextCompat.getColor(this@MainActivity, R.color.outline))
-        }
-        val customView = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(swatch, swatch).apply {
-                marginEnd = (8 * dip).toInt()
-            }
-            background = customBg
-            setOnClickListener { showColorPicker() }
-        }
-        val plus = android.widget.TextView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(swatch, swatch)
-            gravity = android.view.Gravity.CENTER
-            text = "+"
-            textSize = 16f
-            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurface))
-        }
-        val customWrap = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(swatch, swatch).apply {
-                marginEnd = (8 * dip).toInt()
-            }
-            addView(customView)
-            addView(plus)
-            setOnClickListener { showColorPicker() }
-        }
-        bgRow.addView(customWrap)
 
         // 尺寸比例 Chip（null 表示"屏幕分辨率"选项）
         val sizes = listOf<Pair<String, Pair<Float, Float>?>>(
@@ -478,15 +494,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 给点击的色块加主色描边（自定义颜色入口除外） */
-    private fun markSelectedSwatch(row: LinearLayout, index: Int, dip: Float) {
+    private fun markSelectedSwatch(row: ViewGroup, index: Int, dip: Float) {
         for (i in 0 until row.childCount) {
             val child = row.getChildAt(i)
             if (child is FrameLayout) continue
-            if (i != index) continue
+            val origColor = child.tag as? Int ?: continue
+            val isSelected = i == index
             child.background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.TRANSPARENT)
-                setStroke((2.5f * dip).toInt(), ContextCompat.getColor(this@MainActivity, R.color.primary))
+                setColor(origColor)
+                setStroke(
+                    ((if (isSelected) 2.5f else 1.5f) * dip).toInt(),
+                    ContextCompat.getColor(this@MainActivity, if (isSelected) R.color.primary else R.color.outlineVariant)
+                )
             }
         }
     }
@@ -690,7 +710,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyPuzzleTemplate(name: String) {
         canvas.elements.clear()
-        canvas.bgColor = Color.WHITE
+        canvas.bgColor = 0xFFF5F0EB.toInt()
         templateSlots = when (name) {
             getString(R.string.template_1) -> listOf( // 经典 2x2
                 RectF(40f, 40f, 530f, 530f), RectF(550f, 40f, 1040f, 530f),

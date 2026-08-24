@@ -43,7 +43,7 @@ class FreeCanvasView @JvmOverloads constructor(
     var logicalW: Float = 1080f
     var logicalH: Float = 1080f
 
-    var bgColor: Int = Color.WHITE
+    var bgColor: Int = 0xFFF5F0EB.toInt()
         set(value) {
             field = value
             invalidate()
