@@ -1,33 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 2x2 田字拼接图标 -->
+<!-- 重叠照片帧图标：白色底 + 双层圆角矩形 + 山峰太阳剪影 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- 背景 -->
-    <path
-        android:fillColor="#3F51B5"
-        android:pathData="M0,0h108v108h-108z" />
-
-    <!-- 左上 -->
+    <!-- 白色背景 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M26,26 h18 a6,6 0 0 1 6,6 v18 a6,6 0 0 1 -6,6 h-18 a6,6 0 0 1 -6,-6 v-18 a6,6 0 0 1 6,-6 z" />
+        android:pathData="M0,0h108v108h-108z"/>
 
-    <!-- 右上 -->
+    <!-- 后层照片帧（浅靛蓝） -->
+    <path
+        android:fillColor="#C5CAE9"
+        android:pathData="M22,31 a7,7 0 0 1 7,-7 h28 a7,7 0 0 1 7,7 v28 a7,7 0 0 1 -7,7 h-28 a7,7 0 0 1 -7,-7 z"/>
+
+    <!-- 前层照片帧（主题色） -->
+    <path
+        android:fillColor="#4858C8"
+        android:pathData="M42,43 a7,7 0 0 1 7,-7 h30 a7,7 0 0 1 7,7 v30 a7,7 0 0 1 -7,7 h-30 a7,7 0 0 1 -7,-7 z"/>
+
+    <!-- 大山峰 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M58,26 h18 a6,6 0 0 1 6,6 v18 a6,6 0 0 1 -6,6 h-18 a6,6 0 0 1 -6,-6 v-18 a6,6 0 0 1 6,-6 z" />
+        android:pathData="M54,48 L44,68 L64,68 z"/>
 
-    <!-- 左下 -->
+    <!-- 小山峰 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M26,58 h18 a6,6 0 0 1 6,6 v18 a6,6 0 0 1 -6,6 h-18 a6,6 0 0 1 -6,-6 v-18 a6,6 0 0 1 6,-6 z" />
+        android:pathData="M66,52 L56,68 L76,68 z"/>
 
-    <!-- 右下 -->
+    <!-- 太阳 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M58,58 h18 a6,6 0 0 1 6,6 v18 a6,6 0 0 1 -6,6 h-18 a6,6 0 0 1 -6,-6 v-18 a6,6 0 0 1 6,-6 z" />
+        android:pathData="M76,44 m-3,0 a3,3 0 1 1 6,0 a3,3 0 1 1 -6,0"/>
 </vector>
