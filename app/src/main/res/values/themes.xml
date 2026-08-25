@@ -98,18 +98,6 @@
         <item name="android:textColor">?attr/colorOnSurface</item>
     </style>
 
-    <!-- 排列页小号文字按钮 -->
-    <style name="ArrangeChip" parent="Widget.Material3.Button.TonalButton">
-        <item name="android:minWidth">0dp</item>
-        <item name="android:minHeight">0dp</item>
-        <item name="android:layout_width">wrap_content</item>
-        <item name="android:layout_height">34dp</item>
-        <item name="android:insetTop">0dp</item>
-        <item name="android:insetBottom">0dp</item>
-        <item name="android:textSize">11sp</item>
-        <item name="android:paddingStart">4dp</item>
-        <item name="android:paddingEnd">4dp</item>
-    </style>
 
     <!-- Slider 统一样式 -->
     <style name="Widget.App.Slider" parent="Widget.Material3.Slider">
