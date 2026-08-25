@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 左栏列表项：选中态（primaryContainer 圆角背景 + 涟漪） -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="?attr/colorControlHighlight">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/primaryContainer"/>
+            <corners android:radius="10dp"/>
+        </shape>
+    </item>
+</ripple>

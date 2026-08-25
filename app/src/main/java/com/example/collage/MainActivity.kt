@@ -231,12 +231,19 @@ class MainActivity : AppCompatActivity() {
             return
         }
         canvas.elements.sortedByDescending { it.zOrder }.forEachIndexed { idx, el ->
+            val label = buildString {
+                append(if (el is ImageElement) "图 ${canvas.elements.size - idx}" else "文")
+                if (el.locked) append(" \uD83D\uDD12")
+            }
             val row = TextView(this).apply {
-                text = if (el is ImageElement) "图片 ${canvas.elements.size - idx}" else "文本"
+                text = label
                 textSize = 13f
                 setTextColor(ContextCompat.getColor(this@MainActivity, R.color.onSurface))
                 setPadding(20, 24, 20, 24)
-                setBackgroundResource(R.drawable.bg_list_item)
+                setBackgroundResource(
+                    if (el == canvas.selected) R.drawable.bg_list_item_selected
+                    else R.drawable.bg_list_item
+                )
                 setOnClickListener { canvas.selectElement(el); refreshPropertyPanel() }
             }
             leftListContainer.addView(row)
